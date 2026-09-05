@@ -31,6 +31,12 @@ class ZS_Http {
         }
 
         if ($method === 'POST' && $action === 'setup_wizard') {
+            if (!empty($config['key_hash'])) {
+                http_response_code(403);
+                header('Content-Type: text/plain; charset=UTF-8');
+                echo 'Setup has already been completed.';
+                return;
+            }
             self::handleSetup($rootDir, $dataDir, $config);
             return;
         }
@@ -127,7 +133,21 @@ class ZS_Http {
             return;
         }
 
-        self::executeScanBatch($session, $rootDir, $dataDir, $store);
+        $store->withNamedLock('scan_batch', function () use (&$session, $rootDir, $dataDir, $store) {
+            $fresh = $store->loadSessionUnlocked();
+            if (is_array($fresh)) {
+                $session = $fresh;
+            }
+            if (!empty($session['is_completed'])) {
+                return;
+            }
+            self::executeScanBatch($session, $rootDir, $dataDir, $store);
+        });
+
+        if (!empty($session['is_completed']) && php_sapi_name() !== 'cli') {
+            ZS_Ui::renderReport($session, $rootDir, $dataDir, $config, $store);
+            return;
+        }
     }
 
     private static function wantsJson() {
@@ -175,6 +195,10 @@ class ZS_Http {
         }
         self::setAuthCookie($csrfSecret, $newConfig['key_hash']);
         self::setCsrfCookie($csrfSecret, self::currentSessionToken());
+        $secretFile = ZS_Config::getSetupSecretPath($rootDir);
+        if (is_file($secretFile)) {
+            @unlink($secretFile);
+        }
         header('Location: ' . self::getCurrentScriptUrl());
         exit;
     }
@@ -254,8 +278,8 @@ class ZS_Http {
 
     private static function cookiePath() {
         $script = isset($_SERVER['SCRIPT_NAME']) ? str_replace('\\', '/', $_SERVER['SCRIPT_NAME']) : '/';
-        $dir = dirname($script);
-        if ($dir === '/' || $dir === '\\' || $dir === '.' || $dir === '') {
+        $dir = rtrim(str_replace('\\', '/', dirname($script)), '/');
+        if ($dir === '' || $dir === '.' || $dir === '/') {
             return '/';
         }
         return $dir;
@@ -456,10 +480,13 @@ class ZS_Http {
                 return array('ok' => false, 'message' => 'File is not a readable regular file inside the site root.', 'code' => 'MISSING');
             }
             $currentRaw = ZS_Hash::rawFile($path);
-            $expectedUse = $expected !== '' ? $expected : (isset($item['raw_sha256']) ? $item['raw_sha256'] : '');
-            if ($currentRaw === false || $expectedUse === '' || !hash_equals($expectedUse, $currentRaw)) {
+            $sessionRaw = isset($item['raw_sha256']) ? (string)$item['raw_sha256'] : '';
+            if ($currentRaw === false || $sessionRaw === '' || !hash_equals($sessionRaw, $currentRaw)) {
                 $store->updateInfectedItem($found['index'], array('status' => 'CHANGED_SINCE_SCAN'));
                 return array('ok' => false, 'message' => 'File changed since scan.', 'code' => 'CHANGED_SINCE_SCAN', 'index' => $found['index']);
+            }
+            if ($expected !== '' && !hash_equals($sessionRaw, $expected)) {
+                return array('ok' => false, 'message' => 'Expected hash mismatch.', 'code' => 'CHANGED_SINCE_SCAN', 'index' => $found['index']);
             }
             return array('ok' => true, 'session' => $session, 'index' => $found['index'], 'item' => $item, 'path' => $path, 'raw' => $currentRaw);
         }

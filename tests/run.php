@@ -1273,6 +1273,487 @@ run_test('F16: standalone single-file artifact smoke test', function () use ($re
 });
 
 // -------------------------------------------------------------
+// F02: resolveFinding strictly rejects altered disk files and forged client hashes
+// -------------------------------------------------------------
+run_test('F02: resolveFinding strictly rejects altered disk files and forged client hashes', function () {
+    $tempDir = sys_get_temp_dir() . '/zs_f02_hash_' . bin2hex(random_bytes(4));
+    @mkdir($tempDir, 0755, true);
+    $dataDir = $tempDir . '/data';
+    @mkdir($dataDir, 0755, true);
+    $store = new ZS_Store($dataDir);
+
+    $testFile = $tempDir . '/vuln.php';
+    $originalContent = "<?php eval(\$_POST['cmd']);";
+    file_put_contents($testFile, $originalContent);
+    $origHash = hash('sha256', $originalContent);
+
+    $session = $store->initSession($tempDir, true);
+    $fid = 'f_' . bin2hex(random_bytes(4));
+    $session['infected_files'][] = array(
+        'finding_id'      => $fid,
+        'path'            => $testFile,
+        'raw_sha256'      => $origHash,
+        'norm_sha256'     => $origHash,
+        'reason'          => 'eval',
+        'rule_ids'        => array('SIG-01'),
+        'status'          => 'FOUND',
+        'size'            => strlen($originalContent),
+        'coverage'        => 'full',
+        'scan_session_id' => $session['scan_session_id'],
+    );
+    $store->saveSession($session);
+
+    // 1. Alter disk file to new content
+    $alteredContent = "<?php echo 'Cleaned up';";
+    file_put_contents($testFile, $alteredContent);
+    $alteredHash = hash('sha256', $alteredContent);
+
+    // Using reflection to test private resolveFinding
+    $ref = new ReflectionClass('ZS_Http');
+    $m = $ref->getMethod('resolveFinding');
+    if (PHP_VERSION_ID < 80100) {
+        $m->setAccessible(true);
+    }
+
+    // Attempt with altered hash passed by client in expected_raw
+    $_POST = array(
+        'finding_id'      => $fid,
+        'scan_session_id' => $session['scan_session_id'],
+        'expected_raw'    => $alteredHash,
+    );
+    $res = $m->invoke(null, $store, $tempDir, true);
+    assert_false($res['ok'], 'resolveFinding must fail when disk file differs from session scan hash');
+    assert_equals('CHANGED_SINCE_SCAN', $res['code'], 'Code must be CHANGED_SINCE_SCAN');
+
+    // 2. Restore disk content to original, but client passes forged hash
+    file_put_contents($testFile, $originalContent);
+    $_POST['expected_raw'] = 'forged_hash_value_12345';
+    $res2 = $m->invoke(null, $store, $tempDir, true);
+    assert_false($res2['ok'], 'resolveFinding must fail when client expected_raw does not match scan hash');
+
+    // 3. Both match
+    $_POST['expected_raw'] = $origHash;
+    $res3 = $m->invoke(null, $store, $tempDir, true);
+    assert_true($res3['ok'], 'resolveFinding must succeed when disk and client expected_raw match scan hash');
+
+    @unlink($testFile);
+    @unlink($store->getSessionFile());
+    @unlink($dataDir . '/.lock_session');
+    @rmdir($dataDir);
+    @rmdir($tempDir);
+});
+
+// -------------------------------------------------------------
+// F05: setup_wizard cannot overwrite existing key once configured
+// -------------------------------------------------------------
+run_test('F05: setup_wizard is forbidden once key_hash is configured and cleans up setup secret', function () {
+    $tempDir = sys_get_temp_dir() . '/zs_f05_lock_' . bin2hex(random_bytes(4));
+    @mkdir($tempDir, 0755, true);
+    $store = new ZS_Store($tempDir);
+
+    // Put setup secret on disk
+    $secretFile = $tempDir . '/zs-setup.secret';
+    file_put_contents($secretFile, "InitialSecretToken\n");
+
+    // Case 1: Fresh install -> setup_wizard succeeds and unlinks secret
+    $config = array('key_hash' => '');
+    ZS_Config::saveConfig($config, $tempDir);
+
+    $_SERVER['REQUEST_METHOD'] = 'POST';
+    $_POST = array(
+        'do_action'     => 'setup_wizard',
+        'setup_secret'  => 'InitialSecretToken',
+        'custom_key'    => 'ValidAccessKey123',
+    );
+    $_COOKIE = array();
+
+    $script = $tempDir . '/run_setup.php';
+    $code = '<?php
+    define("ZS_INTERNAL", true);
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Config.php', true) . ';
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Store.php', true) . ';
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/I18n.php', true) . ';
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Ui.php', true) . ';
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Http.php', true) . ';
+    $tempDir = $argv[1];
+    $_SERVER["REQUEST_METHOD"] = "POST";
+    $_SERVER["SCRIPT_NAME"] = "/malware-cleaner.php";
+    $_POST = array(
+        "do_action"     => "setup_wizard",
+        "setup_secret"  => "InitialSecretToken",
+        "custom_key"    => "ValidAccessKey123",
+    );
+    ZS_Http::handleRequest($tempDir, $tempDir);
+    ';
+    file_put_contents($script, $code);
+
+    $bin = (defined('PHP_BINARY') && PHP_BINARY) ? PHP_BINARY : 'php';
+    shell_exec(escapeshellarg($bin) . ' ' . escapeshellarg($script) . ' ' . escapeshellarg($tempDir));
+
+    $savedConfig = ZS_Config::loadConfig($tempDir);
+    assert_true(!empty($savedConfig['key_hash']), 'Key hash must be configured');
+    assert_true(password_verify('ValidAccessKey123', $savedConfig['key_hash']), 'Configured key must match');
+    assert_false(file_exists($secretFile), 'zs-setup.secret must be unlinked after successful setup');
+
+    // Case 2: Attempting setup_wizard after key is configured must return 403
+    file_put_contents($secretFile, "AttackerToken\n");
+    $attackScript = $tempDir . '/run_attack.php';
+    $attackCode = '<?php
+    define("ZS_INTERNAL", true);
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Config.php', true) . ';
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Store.php', true) . ';
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/I18n.php', true) . ';
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Ui.php', true) . ';
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Http.php', true) . ';
+    $tempDir = $argv[1];
+    $_SERVER["REQUEST_METHOD"] = "POST";
+    $_POST = array(
+        "do_action"     => "setup_wizard",
+        "setup_secret"  => "AttackerToken",
+        "custom_key"    => "AttackerKey12345",
+    );
+    ZS_Http::handleRequest($tempDir, $tempDir);
+    ';
+    file_put_contents($attackScript, $attackCode);
+
+    $attackOutput = shell_exec(escapeshellarg($bin) . ' ' . escapeshellarg($attackScript) . ' ' . escapeshellarg($tempDir));
+    assert_true(strpos($attackOutput, 'Setup has already been completed.') !== false, 'Setup must be refused when key_hash is set');
+
+    $checkConfig = ZS_Config::loadConfig($tempDir);
+    assert_true(password_verify('ValidAccessKey123', $checkConfig['key_hash']), 'Original key must remain intact');
+
+    @unlink($script);
+    @unlink($attackScript);
+    @unlink($secretFile);
+    @unlink($tempDir . '/config.php');
+    @rmdir($tempDir);
+});
+
+// -------------------------------------------------------------
+// F09: Full content redaction before snippet window prevents leaks
+// -------------------------------------------------------------
+run_test('F09: redaction before snippet boundary prevents credential leaks in large files', function () {
+    $tempDir = sys_get_temp_dir() . '/zs_f09_leak_' . bin2hex(random_bytes(4));
+    @mkdir($tempDir, 0755, true);
+    $store = new ZS_Store($tempDir);
+
+    // Build a large file > 32KB where secret is right at cut boundary (at offset ~4028)
+    $pad1 = str_repeat("/* padding line */\n", 212); // ~4028 bytes
+    $secretLine = "define('DB_PASSWORD', 'LEAKY_SECRET_XYZ_999_VERY_LONG_SECRET_KEY');\n";
+    $pad2 = str_repeat("/* trailing padding line */\n", 2000); // 40KB+
+    $largeContent = $pad1 . $secretLine . $pad2;
+
+    $filePath = $tempDir . '/large_app.php';
+    file_put_contents($filePath, $largeContent);
+    $rawHash = hash('sha256', $largeContent);
+
+    $capturedPayload = '';
+    ZS_Gemini::$http = function ($url, $headers, $payloadJson, $method) use (&$capturedPayload) {
+        $capturedPayload = $payloadJson;
+        return array(
+            'status' => 200,
+            'body' => json_encode(array(
+                'candidates' => array(
+                    array(
+                        'finishReason' => 'STOP',
+                        'content' => array(
+                            'parts' => array(
+                                array('text' => json_encode(array(
+                                    'verdict' => 'uncertain',
+                                    'confidence' => 0.4,
+                                    'summary' => 'Large file',
+                                    'recommended_action' => 'manual_review',
+                                )))
+                            )
+                        )
+                    )
+                )
+            )),
+        );
+    };
+
+    $config = array(
+        'gemini_api_keys' => array('test_key_f09'),
+        'root_dir'        => $tempDir,
+    );
+
+    $verdict = ZS_Gemini::ask($rawHash, $filePath, $largeContent, array('test'), $config, $store);
+    ZS_Gemini::$http = null;
+
+    assert_false(strpos($capturedPayload, 'LEAKY_SECRET_XYZ_999') !== false, 'Payload to Gemini must NOT contain unredacted password');
+    assert_true(strpos($capturedPayload, '[REDACTED]') !== false, 'Payload to Gemini must contain [REDACTED]');
+
+    @unlink($filePath);
+    @unlink($store->getKnowledgeFile());
+    @rmdir($tempDir);
+});
+
+// -------------------------------------------------------------
+// F12 / F16: auto_review_step and control real endpoint integration
+// -------------------------------------------------------------
+run_test('F12/F16: auto_review_step and auto_review_control real endpoint integration test', function () {
+    $tempDir = sys_get_temp_dir() . '/zs_f12_auto_' . bin2hex(random_bytes(4));
+    @mkdir($tempDir, 0755, true);
+
+    $workerScript = $tempDir . '/auto_review_worker.php';
+    $workerCode = '<?php
+    define("ZS_INTERNAL", true);
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Hash.php', true) . ';
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Config.php', true) . ';
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/I18n.php', true) . ';
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Rules.php', true) . ';
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Store.php', true) . ';
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Quarantine.php', true) . ';
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Engine.php', true) . ';
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Gemini.php', true) . ';
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Share.php', true) . ';
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Http.php', true) . ';
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Ui.php', true) . ';
+
+    $rootDir = $argv[1];
+    $dataDir = $rootDir;
+    $store = new ZS_Store($dataDir);
+
+    // Setup config
+    $csrfSecret = "csrf_test_secret_1234567890123456";
+    $keyHash = password_hash("AdminPass1234", PASSWORD_DEFAULT);
+    $config = array(
+        "key_hash"        => $keyHash,
+        "csrf_secret"     => $csrfSecret,
+        "gemini_api_keys" => array("test_key_123"),
+    );
+    ZS_Config::saveConfig($config, $dataDir);
+
+    // Create infected file
+    $badPath = $rootDir . "/shell.php";
+    $badCode = "<?php eval(base64_decode(\"ZWNobyAnYmFkJzs=\"));";
+    file_put_contents($badPath, $badCode);
+    $rawHash = hash("sha256", $badCode);
+
+    // Setup session with infected file
+    $session = $store->initSession($rootDir, true);
+    $fid = "fid_test_1";
+    $session["infected_files"] = array(
+        array(
+            "finding_id"      => $fid,
+            "path"            => $badPath,
+            "raw_sha256"      => $rawHash,
+            "norm_sha256"     => $rawHash,
+            "reason"          => "eval base64",
+            "rule_ids"        => array("SIG-EVAL"),
+            "evidence"        => array("eval(base64_decode)"),
+            "status"          => "FOUND",
+            "size"            => strlen($badCode),
+            "coverage"        => "full",
+            "scan_session_id" => $session["scan_session_id"],
+        ),
+    );
+    $store->saveSession($session);
+
+    // Fake authentication cookies
+    $authExpiry = time() + 3600;
+    $authHmac = hash_hmac("sha256", "zs_auth:" . $authExpiry . ":" . $keyHash, $csrfSecret);
+    $sessionCookie = $authHmac . ":" . $authExpiry;
+    $_COOKIE["zs_session"] = $sessionCookie;
+
+    $csrfExpiry = time() + 3600;
+    $csrfHmac = hash_hmac("sha256", "zs_csrf:" . $csrfExpiry . ":" . $sessionCookie, $csrfSecret);
+    $csrfToken = $csrfHmac . ":" . $csrfExpiry;
+    $_COOKIE["zs_csrf"] = $csrfToken;
+
+    $_SERVER["REQUEST_METHOD"] = "POST";
+    $_SERVER["HTTP_X_CSRF_TOKEN"] = $csrfToken;
+    $_SERVER["HTTP_ACCEPT"] = "application/json";
+
+    // Step 1: Start auto review
+    $_POST = array("do_action" => "auto_review_control", "op" => "start");
+    ob_start();
+    // Wrap to prevent exit
+    ZS_Http::handleRequest($rootDir, $dataDir);
+    ';
+    // Since handleRequest calls exit on jsonOk, we run separate commands via CLI to test endpoints
+    $scriptControl = $tempDir . '/test_control.php';
+    file_put_contents($scriptControl, '<?php
+    define("ZS_INTERNAL", true);
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Config.php', true) . ';
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Store.php', true) . ';
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/I18n.php', true) . ';
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Ui.php', true) . ';
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Http.php', true) . ';
+    $rootDir = $argv[1];
+    $store = new ZS_Store($rootDir);
+    $config = ZS_Config::loadConfig($rootDir);
+
+    $authExpiry = time() + 3600;
+    $sessionCookie = hash_hmac("sha256", "zs_auth:" . $authExpiry . ":" . $config["key_hash"], $config["csrf_secret"]) . ":" . $authExpiry;
+    $_COOKIE["zs_session"] = $sessionCookie;
+    $csrfExpiry = time() + 3600;
+    $csrfToken = hash_hmac("sha256", "zs_csrf:" . $csrfExpiry . ":" . $sessionCookie, $config["csrf_secret"]) . ":" . $csrfExpiry;
+    $_COOKIE["zs_csrf"] = $csrfToken;
+
+    $_SERVER["REQUEST_METHOD"] = "POST";
+    $_SERVER["HTTP_X_CSRF_TOKEN"] = $csrfToken;
+    $_SERVER["HTTP_ACCEPT"] = "application/json";
+    $_POST = array("do_action" => "auto_review_control", "op" => $argv[2]);
+
+    ZS_Http::handleRequest($rootDir, $rootDir);
+    ');
+
+    $scriptStep = $tempDir . '/test_step.php';
+    file_put_contents($scriptStep, '<?php
+    define("ZS_INTERNAL", true);
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Hash.php', true) . ';
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Config.php', true) . ';
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Store.php', true) . ';
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/I18n.php', true) . ';
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Ui.php', true) . ';
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Rules.php', true) . ';
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Quarantine.php', true) . ';
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Engine.php', true) . ';
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Gemini.php', true) . ';
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Http.php', true) . ';
+
+    $rootDir = $argv[1];
+    $store = new ZS_Store($rootDir);
+    $config = ZS_Config::loadConfig($rootDir);
+
+    $authExpiry = time() + 3600;
+    $sessionCookie = hash_hmac("sha256", "zs_auth:" . $authExpiry . ":" . $config["key_hash"], $config["csrf_secret"]) . ":" . $authExpiry;
+    $_COOKIE["zs_session"] = $sessionCookie;
+    $csrfExpiry = time() + 3600;
+    $csrfToken = hash_hmac("sha256", "zs_csrf:" . $csrfExpiry . ":" . $sessionCookie, $config["csrf_secret"]) . ":" . $csrfExpiry;
+    $_COOKIE["zs_csrf"] = $csrfToken;
+
+    $_SERVER["REQUEST_METHOD"] = "POST";
+    $_SERVER["HTTP_X_CSRF_TOKEN"] = $csrfToken;
+    $_SERVER["HTTP_ACCEPT"] = "application/json";
+    $_POST = array("do_action" => "auto_review_step");
+
+    // Mock Gemini
+    ZS_Gemini::$http = function ($url, $headers, $payloadJson, $method) {
+        return array(
+            "status" => 200,
+            "body" => json_encode(array(
+                "candidates" => array(
+                    array(
+                        "finishReason" => "STOP",
+                        "content" => array(
+                            "parts" => array(
+                                array("text" => json_encode(array(
+                                    "verdict"            => "malicious",
+                                    "confidence"         => 0.95,
+                                    "summary"            => "Known backdoor",
+                                    "recommended_action" => "quarantine",
+                                )))
+                            )
+                        )
+                    )
+                )
+            )),
+        );
+    };
+
+    ZS_Http::handleRequest($rootDir, $rootDir);
+    ');
+
+    $bin = (defined('PHP_BINARY') && PHP_BINARY) ? PHP_BINARY : 'php';
+
+    // Prepare store and files
+    $store = new ZS_Store($tempDir);
+    $keyHash = password_hash('Pass12345678', PASSWORD_DEFAULT);
+    ZS_Config::saveConfig(array('key_hash' => $keyHash, 'csrf_secret' => 'secret12345678901234567890', 'gemini_api_keys' => array('key1')), $tempDir);
+
+    $badFile = $tempDir . '/malware_test.php';
+    $badCode = "<?php eval(base64_decode('test'));";
+    file_put_contents($badFile, $badCode);
+    $rawHash = hash('sha256', $badCode);
+
+    $session = $store->initSession($tempDir, true);
+    $session['infected_files'] = array(
+        array(
+            'finding_id'      => 'fid_1',
+            'path'            => $badFile,
+            'raw_sha256'      => $rawHash,
+            'norm_sha256'     => $rawHash,
+            'reason'          => 'eval',
+            'rule_ids'        => array('SIG-01'),
+            'evidence'        => array('eval'),
+            'status'          => 'FOUND',
+            'size'            => strlen($badCode),
+            'coverage'        => 'full',
+            'scan_session_id' => $session['scan_session_id'],
+        ),
+    );
+    $store->saveSession($session);
+
+    // 1. Start job via control
+    $outControl = shell_exec(escapeshellarg($bin) . ' ' . escapeshellarg($scriptControl) . ' ' . escapeshellarg($tempDir) . ' start');
+    $resControl = json_decode($outControl, true);
+    assert_true(is_array($resControl) && !empty($resControl['success']), 'auto_review_control start must succeed');
+    assert_equals('running', $resControl['job']['status'], 'Job status must be running');
+
+    // 2. Run step via auto_review_step
+    $outStep = shell_exec(escapeshellarg($bin) . ' ' . escapeshellarg($scriptStep) . ' ' . escapeshellarg($tempDir));
+    $resStep = json_decode($outStep, true);
+    assert_true(is_array($resStep) && !empty($resStep['success']), 'auto_review_step must succeed');
+    assert_equals('quarantined', $resStep['action_taken'], 'Action taken must be quarantined');
+    assert_false(file_exists($badFile), 'Original infected file must be deleted after quarantine');
+
+    // Verify session updated
+    $sessAfter = $store->loadSession();
+    assert_equals('AI_QUARANTINED', $sessAfter['infected_files'][0]['status'], 'Status must be AI_QUARANTINED');
+    assert_true(!empty($sessAfter['infected_files'][0]['backup_name']), 'Backup name must be recorded');
+
+    // Verify quarantine envelope exists and is non-executable
+    $qDir = ZS_Config::getQuarantineDir($tempDir, $tempDir);
+    $qPath = $qDir . '/' . $sessAfter['infected_files'][0]['backup_name'];
+    assert_true(file_exists($qPath), 'Quarantine envelope file must exist on disk');
+
+    // 3. Test pause control
+    shell_exec(escapeshellarg($bin) . ' ' . escapeshellarg($scriptControl) . ' ' . escapeshellarg($tempDir) . ' pause');
+    $outPausedStep = shell_exec(escapeshellarg($bin) . ' ' . escapeshellarg($scriptStep) . ' ' . escapeshellarg($tempDir));
+    $resPausedStep = json_decode($outPausedStep, true);
+    assert_true(!empty($resPausedStep['paused']), 'auto_review_step must return paused: true when job is paused');
+
+    @unlink($scriptControl);
+    @unlink($scriptStep);
+    @unlink($qPath);
+    @unlink($qDir . '/manifest.php');
+    @unlink($qDir . '/.htaccess');
+    @unlink($qDir . '/index.php');
+    @rmdir($qDir);
+    @unlink($store->getSessionFile());
+    @unlink($store->getKnowledgeFile());
+    @unlink($tempDir . '/config.php');
+    @unlink($tempDir . '/.lock_session');
+    @unlink($tempDir . '/.lock_knowledge');
+    @rmdir($tempDir);
+});
+
+// -------------------------------------------------------------
+// F15: cookiePath normalizes subdirectories without trailing slash
+// -------------------------------------------------------------
+run_test('F15: cookiePath normalizes subdirectories without trailing slash', function () {
+    $ref = new ReflectionClass('ZS_Http');
+    $m = $ref->getMethod('cookiePath');
+    if (PHP_VERSION_ID < 80100) {
+        $m->setAccessible(true);
+    }
+
+    $_SERVER['SCRIPT_NAME'] = '/wordpress/malware-cleaner.php';
+    assert_equals('/wordpress', $m->invoke(null), 'Subdirectory must have no trailing slash');
+
+    $_SERVER['SCRIPT_NAME'] = '/site/sub/cleaner.php';
+    assert_equals('/site/sub', $m->invoke(null), 'Nested subdirectory must have no trailing slash');
+
+    $_SERVER['SCRIPT_NAME'] = '/malware-cleaner.php';
+    assert_equals('/', $m->invoke(null), 'Root script must return /');
+
+    $_SERVER['SCRIPT_NAME'] = 'cleaner.php';
+    assert_equals('/', $m->invoke(null), 'Relative script must return /');
+});
+
+// -------------------------------------------------------------
 // Summary
 // -------------------------------------------------------------
 echo "\n===================================\n";

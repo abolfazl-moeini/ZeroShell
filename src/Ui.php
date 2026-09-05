@@ -215,11 +215,17 @@ class ZS_Ui {
         );
         ?>
     <script>
-        window.ZS_BOOT = <?php echo json_encode($boot, ZS_Config::jsonFlags()); ?>;
-        window.REVIEW_ITEMS = window.ZS_BOOT.items;
-        window.ZS_I18N = window.ZS_BOOT.i18n;
-        window.ZS_CSRF = window.ZS_BOOT.csrf;
-        window.ZS_SESSION_ID = window.ZS_BOOT.session_id;
+        <?php
+        $jsonBoot = json_encode($boot, ZS_Config::jsonFlags());
+        if ($jsonBoot === false) {
+            $jsonBoot = '{}';
+        }
+        ?>
+        window.ZS_BOOT = <?php echo $jsonBoot; ?>;
+        window.REVIEW_ITEMS = window.ZS_BOOT.items || [];
+        window.ZS_I18N = window.ZS_BOOT.i18n || {};
+        window.ZS_CSRF = window.ZS_BOOT.csrf || '';
+        window.ZS_SESSION_ID = window.ZS_BOOT.session_id || '';
     </script>
     <div class="card">
         <div class="header-row">
@@ -261,7 +267,7 @@ class ZS_Ui {
         <?php else : ?>
             <table>
                 <thead><tr>
-                    <th></th><th>#</th><th><?php echo htmlspecialchars(ZS_I18n::t('table_path'), ENT_QUOTES, 'UTF-8'); ?></th>
+                    <th style="width:30px;"><input type="checkbox" id="selectAllFindings" title="Select / Deselect All"></th><th>#</th><th><?php echo htmlspecialchars(ZS_I18n::t('table_path'), ENT_QUOTES, 'UTF-8'); ?></th>
                     <th><?php echo htmlspecialchars(ZS_I18n::t('table_reason'), ENT_QUOTES, 'UTF-8'); ?></th>
                     <th><?php echo htmlspecialchars(ZS_I18n::t('table_actions'), ENT_QUOTES, 'UTF-8'); ?></th>
                 </tr></thead>
@@ -416,8 +422,13 @@ class ZS_Ui {
                 if (empty($quarantined)) : ?>
                     <p style="color:#94a3b8;font-size:12px;"><?php echo htmlspecialchars(ZS_I18n::t('settings_no_quarantine'), ENT_QUOTES, 'UTF-8'); ?></p>
                 <?php else : foreach ($quarantined as $bName => $qMeta) : ?>
-                    <div>
-                        <code><?php echo htmlspecialchars($bName, ENT_QUOTES, 'UTF-8'); ?></code>
+                    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;gap:8px;">
+                        <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;">
+                            <code><?php echo htmlspecialchars($bName, ENT_QUOTES, 'UTF-8'); ?></code>
+                            <?php if (!empty($qMeta['original_path'])) : ?>
+                                <span style="color:#94a3b8;margin-left:6px;"><?php echo htmlspecialchars(ZS_Share::anonymizePath($qMeta['original_path'], $rootDir), ENT_QUOTES, 'UTF-8'); ?></span>
+                            <?php endif; ?>
+                        </div>
                         <button type="button" class="btn btn-green" data-restore="<?php echo htmlspecialchars($bName, ENT_QUOTES, 'UTF-8'); ?>"><?php echo htmlspecialchars(ZS_I18n::t('settings_btn_restore'), ENT_QUOTES, 'UTF-8'); ?></button>
                     </div>
                 <?php endforeach; endif; ?>

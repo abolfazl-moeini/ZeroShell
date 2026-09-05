@@ -164,5 +164,15 @@ return array(
     'path_languages_fake' => 'Fake PHP script in Languages directory (not a valid .l10n.php file)',
     'path_uploads_php' => 'Illegal PHP executable in Uploads directory',
     'path_rogue_core' => 'Known Rogue File in WordPress Core',
-    'path_double_ext' => 'Dangerous Double Extension'
+    'path_double_ext' => 'Dangerous Double Extension',
+    'modal_err_network' => 'Network error fetching file content.',
+    'modal_err_read' => 'Cannot read file content.',
+    'err_delete_failed' => 'Delete and quarantine failed.',
+    'err_ai_failed' => 'AI analysis request failed.',
+    'err_restore_failed' => 'File restore failed.',
+    'prompt_dest_override' => 'Destination file already exists. Enter an alternative destination path within site root:',
+    'toast_rules_sync_failed' => 'Rules sync failed.',
+    'toast_rules_updated_simple' => 'Rules successfully updated.',
+    'auto_ai_stopped_errors' => 'Auto AI review stopped due to repeated network/server errors.',
+    'auto_ai_auth_expired' => 'Authentication session expired. Please refresh and log in again.'
 );

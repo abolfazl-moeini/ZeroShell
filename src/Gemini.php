@@ -116,8 +116,9 @@ class ZS_Gemini {
         }
 
         $rootDir = isset($config['root_dir']) ? $config['root_dir'] : ZS_Config::getRoot();
-        $built = self::buildSnippet($content, $matchHint);
-        $redactedSnippet = self::redact($built['snippet'], $rootDir);
+        $redactedFull = self::redact($content, $rootDir);
+        $built = self::buildSnippet($redactedFull, $matchHint);
+        $redactedSnippet = $built['snippet'];
         $relPath = self::redact($filePath, $rootDir);
         $flags = is_array($reasons) ? implode('; ', $reasons) : (string)$reasons;
 
@@ -272,7 +273,10 @@ class ZS_Gemini {
         if (empty($keys)) {
             return array('success' => false, 'message' => 'No API key configured.');
         }
-        $apiKey = $keys[0];
+        $apiKey = ZS_Config::getActiveGeminiKey($config);
+        if ($apiKey === null) {
+            $apiKey = $keys[0];
+        }
         $url = 'https://generativelanguage.googleapis.com/v1beta/models/' . rawurlencode($model) . ':generateContent';
         $payload = json_encode(array(
             'contents' => array(array('parts' => array(array('text' => 'Reply with the JSON object {"ok":true} only.')))),

@@ -56,7 +56,8 @@ function findingFields(file) {
 }
 
 function switchLang(lang) {
-    document.cookie = 'zs_lang=' + lang + ';path=' + (window.location.pathname.replace(/[^/]+$/, '') || '/') + ';max-age=' + (86400 * 365) + ';SameSite=Lax';
+    const p = window.location.pathname.replace(/\/[^/]*$/, '') || '/';
+    document.cookie = 'zs_lang=' + lang + ';path=' + p + ';max-age=' + (86400 * 365) + ';SameSite=Lax';
     window.location.reload();
 }
 
@@ -68,7 +69,13 @@ function fillTableText() {
         const pathCell = row.querySelector('.dir-path');
         const reasonCell = row.querySelector('.reason-cell');
         if (pathCell) pathCell.textContent = file.path;
-        if (reasonCell) reasonCell.textContent = file.reason;
+        if (reasonCell) {
+            let txt = file.reason;
+            if (file.ai_verdict && file.ai_verdict.verdict) {
+                txt += ' [AI: ' + file.ai_verdict.verdict + ' ' + Math.round((file.ai_verdict.confidence || 0) * 100) + '%]';
+            }
+            reasonCell.textContent = txt;
+        }
     });
 }
 
@@ -76,7 +83,7 @@ function setDecisionLocked(locked) {
     decisionsLocked = locked;
     ['modalDeleteBtn', 'btnMarkClean', 'modalAskAiBtn', 'btnNextBottom', 'btnPrevTop', 'btnNextTop'].forEach(function (id) {
         const el = document.getElementById(id);
-        if (el && id !== 'modalAskAiBtn') el.disabled = locked;
+        if (el) el.disabled = locked;
     });
 }
 
@@ -158,14 +165,14 @@ function loadCurrentFile() {
             if (data.success) {
                 codeEl.textContent = data.content + (data.is_truncated ? '\n\n' + t('modal_trunc_notice') : '');
             } else {
-                codeEl.textContent = data.message || 'Cannot read file.';
+                codeEl.textContent = data.message || t('modal_err_read');
             }
             setDecisionLocked(false);
         })
         .catch(function (e) {
             if (e && e.name === 'AbortError') return;
             if ((window.REVIEW_ITEMS[currentReviewIndex] || {}).finding_id !== loadId) return;
-            codeEl.textContent = 'Network error.';
+            codeEl.textContent = t('modal_err_network');
             setDecisionLocked(false);
         });
 }
@@ -213,7 +220,7 @@ function deleteAndNext() {
             showToast(data.message || t('toast_quarantined'));
             nextReviewFile();
         } else {
-            alert(data.message || 'Delete failed.');
+            alert(data.message || t('err_delete_failed'));
             setDecisionLocked(false);
         }
     }).catch(function () { setDecisionLocked(false); });
@@ -277,7 +284,7 @@ function askAiCurrent() {
             aiBadge.textContent = 'AI: ' + data.verdict.verdict + ' — ' + t('ai_advisory_short');
             showToast((data.verdict.summary || data.verdict.verdict) + ' (' + t('ai_advisory_short') + ')');
         } else {
-            alert(data.message || 'AI request failed.');
+            alert(data.message || t('err_ai_failed'));
         }
     }).catch(function () { if (btn) btn.disabled = false; });
 }
@@ -350,9 +357,34 @@ function cancelAutoReview() {
     });
 }
 
+let autoConsecutiveErrors = 0;
+
 function runAutoReviewNextStep() {
     if (!autoReviewActive || autoReviewPaused) return;
     postForm({ do_action: 'auto_review_step' }).then(function (data) {
+        if (data.code === 'AUTH') {
+            autoReviewActive = false;
+            clearAutoTimer();
+            alert(t('auto_ai_auth_expired'));
+            window.location.reload();
+            return;
+        }
+        if (!data.success) {
+            autoConsecutiveErrors++;
+            if (autoConsecutiveErrors >= 5) {
+                autoReviewActive = false;
+                clearAutoTimer();
+                const errTxt = t('auto_ai_stopped_errors');
+                document.getElementById('autoReviewProgressText').textContent = errTxt;
+                showToast(errTxt);
+                return;
+            }
+            autoTimer = setTimeout(function () {
+                if (autoReviewActive && !autoReviewPaused) runAutoReviewNextStep();
+            }, 5000);
+            return;
+        }
+        autoConsecutiveErrors = 0;
         if (data.paused) return;
         if (data.finished) {
             autoReviewActive = false;
@@ -374,6 +406,15 @@ function runAutoReviewNextStep() {
             if (autoReviewActive && !autoReviewPaused) runAutoReviewNextStep();
         }, delay);
     }).catch(function () {
+        autoConsecutiveErrors++;
+        if (autoConsecutiveErrors >= 5) {
+            autoReviewActive = false;
+            clearAutoTimer();
+            const errTxt = t('auto_ai_stopped_errors');
+            document.getElementById('autoReviewProgressText').textContent = errTxt;
+            showToast(errTxt);
+            return;
+        }
         autoTimer = setTimeout(function () {
             if (autoReviewActive && !autoReviewPaused) runAutoReviewNextStep();
         }, 5000);
@@ -484,9 +525,17 @@ function bindUi() {
         const urlInput = document.getElementById('set_rules_sync_url');
         const url = urlInput ? urlInput.value : '';
         postForm({ do_action: 'sync_rules', rules_sync_url: url }).then(function (data) {
-            showToast(data.message || (data.success ? 'Rules updated' : 'Sync failed'));
+            showToast(data.message || (data.success ? t('toast_rules_updated_simple') : t('toast_rules_sync_failed')));
         });
     });
+    const selectAll = document.getElementById('selectAllFindings');
+    if (selectAll) {
+        selectAll.addEventListener('change', function () {
+            document.querySelectorAll('.share-select').forEach(function (chk) {
+                chk.checked = selectAll.checked;
+            });
+        });
+    }
     document.querySelectorAll('[data-revoke-hash]').forEach(function (btn) {
         btn.addEventListener('click', function () {
             postForm({ do_action: 'revoke_trusted', raw_hash: btn.getAttribute('data-revoke-hash') }).then(function (data) {
@@ -497,11 +546,26 @@ function bindUi() {
     });
     document.querySelectorAll('[data-restore]').forEach(function (btn) {
         btn.addEventListener('click', function () {
-            postForm({ do_action: 'restore_file', backup_name: btn.getAttribute('data-restore') }).then(function (data) {
+            const backupName = btn.getAttribute('data-restore');
+            postForm({ do_action: 'restore_file', backup_name: backupName }).then(function (data) {
                 if (!data.success) {
-                    alert(data.message || 'Restore failed.');
+                    if (data.code === 'DEST_EXISTS') {
+                        const override = prompt((data.message || '') + '\n' + t('prompt_dest_override'));
+                        if (override && override.trim()) {
+                            postForm({ do_action: 'restore_file', backup_name: backupName, dest_override: override.trim() }).then(function (res2) {
+                                if (!res2.success) {
+                                    alert(res2.message || t('err_restore_failed'));
+                                } else {
+                                    showToast(res2.message || t('toast_restored'));
+                                    window.location.reload();
+                                }
+                            });
+                            return;
+                        }
+                    }
+                    alert(data.message || t('err_restore_failed'));
                 } else {
-                    showToast(data.message || '');
+                    showToast(data.message || t('toast_restored'));
                     window.location.reload();
                 }
             });
@@ -541,7 +605,31 @@ function bindUi() {
 
 document.addEventListener('DOMContentLoaded', bindUi);
 
+function trapFocus(modalEl, e) {
+    if (e.key !== 'Tab') return;
+    const focusables = modalEl.querySelectorAll('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])');
+    if (!focusables.length) return;
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    if (e.shiftKey) {
+        if (document.activeElement === first) {
+            e.preventDefault();
+            last.focus();
+        }
+    } else {
+        if (document.activeElement === last) {
+            e.preventDefault();
+            first.focus();
+        }
+    }
+}
+
 document.addEventListener('keydown', function (e) {
+    const activeModal = document.querySelector('.modal-overlay.active');
+    if (activeModal && e.key === 'Tab') {
+        trapFocus(activeModal, e);
+        return;
+    }
     const tag = (e.target.tagName || '').toLowerCase();
     if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
     if (e.metaKey || e.ctrlKey || e.altKey) return;
@@ -551,6 +639,7 @@ document.addEventListener('keydown', function (e) {
         const sm = document.getElementById('settingsModal');
         const am = document.getElementById('autoReviewModal');
         if (sm) sm.classList.remove('active');
+        if (am) am.classList.remove('active');
         return;
     }
     if (!isModalActive || decisionsLocked) return;
