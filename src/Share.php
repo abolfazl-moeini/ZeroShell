@@ -1,33 +1,68 @@
 <?php
 class ZS_Share {
-    public static function buildBundle($session, $rootDir, $rules = array()) {
+    public static function buildBundle($session, $rootDir, $selectedIds = array(), $includeSamples = false, $quarantineDir = '') {
         $findings = isset($session['infected_files']) && is_array($session['infected_files'])
             ? $session['infected_files']
             : array();
 
+        $selectedMap = array();
+        foreach ((array)$selectedIds as $id) {
+            $id = trim((string)$id);
+            if ($id !== '') {
+                $selectedMap[$id] = true;
+            }
+        }
+
         $bundleItems = array();
+        $bytes = 0;
+        $maxBytes = 262144;
+        $maxItems = 25;
+
         foreach ($findings as $item) {
+            $fid = isset($item['finding_id']) ? $item['finding_id'] : '';
+            if (!empty($selectedMap) && ($fid === '' || !isset($selectedMap[$fid]))) {
+                continue;
+            }
+            $status = isset($item['status']) ? $item['status'] : '';
+            if ($status === 'TRUSTED_HIDDEN' || $status === 'TRUSTED' || $status === 'AI_SKIPPED') {
+                continue;
+            }
+            if (count($bundleItems) >= $maxItems) {
+                break;
+            }
+
             $path = isset($item['path']) ? $item['path'] : '';
             $relPath = self::anonymizePath($path, $rootDir);
-            $rawHash = isset($item['raw_sha256']) ? $item['raw_sha256'] : '';
-            $normHash = isset($item['norm_sha256']) ? $item['norm_sha256'] : '';
-            $reason = isset($item['reason']) ? $item['reason'] : '';
-
             $evidence = '';
-            if (file_exists($path) && is_readable($path)) {
-                $content = @file_get_contents($path, false, null, 0, 16384);
-                if ($content !== false) {
-                    $evidence = self::extractEvidenceLines($content, 12, $rootDir);
+            if (!empty($item['evidence']) && is_array($item['evidence'])) {
+                $evidence = implode("\n", array_slice($item['evidence'], 0, 3));
+            }
+            $evidence = ZS_Gemini::redact($evidence, $rootDir);
+            if (strlen($evidence) > 400) {
+                $evidence = substr($evidence, 0, 400);
+            }
+
+            $entry = array(
+                'finding_id'  => $fid,
+                'rel_path'    => $relPath,
+                'raw_sha256'  => isset($item['raw_sha256']) ? $item['raw_sha256'] : '',
+                'norm_sha256' => isset($item['norm_sha256']) ? $item['norm_sha256'] : '',
+                'reason'      => isset($item['reason']) ? $item['reason'] : '',
+                'rule_ids'    => isset($item['rule_ids']) ? $item['rule_ids'] : array(),
+                'status'      => $status,
+                'evidence'    => $evidence,
+            );
+
+            if ($includeSamples && !empty($item['backup_name']) && $quarantineDir !== '') {
+                $payload = ZS_Quarantine::readPayload($quarantineDir, $item['backup_name']);
+                if (is_string($payload) && (strlen($payload) + $bytes) <= $maxBytes && strlen($payload) <= 512 * 1024) {
+                    $entry['sample_b64'] = base64_encode($payload);
+                    $entry['sample_sha256'] = hash('sha256', $payload);
+                    $bytes += strlen($payload);
                 }
             }
 
-            $bundleItems[] = array(
-                'rel_path'    => $relPath,
-                'raw_sha256'  => $rawHash,
-                'norm_sha256' => $normHash,
-                'reason'      => $reason,
-                'evidence'    => $evidence,
-            );
+            $bundleItems[] = $entry;
         }
 
         return array(
@@ -35,6 +70,7 @@ class ZS_Share {
             'version'     => '1.0.0',
             'created_at'  => time(),
             'total_items' => count($bundleItems),
+            'includes_samples' => $includeSamples,
             'items'       => $bundleItems,
         );
     }
@@ -42,38 +78,23 @@ class ZS_Share {
     public static function anonymizePath($path, $rootDir) {
         $normPath = str_replace('\\', '/', $path);
         $normRoot = str_replace('\\', '/', rtrim($rootDir, '/\\'));
-
         if (!empty($normRoot) && strpos($normPath, $normRoot) === 0) {
-            $sub = substr($normPath, strlen($normRoot));
-            $sub = ltrim($sub, '/');
-            return $sub;
+            return ltrim(substr($normPath, strlen($normRoot)), '/');
         }
-
-        // Fallback: look for wp-content or common WP folders
-        $pos = strpos($normPath, 'wp-content');
-        if ($pos !== false) {
-            return substr($normPath, $pos);
+        foreach (array('wp-content', 'wp-includes', 'wp-admin') as $marker) {
+            $pos = strpos($normPath, $marker);
+            if ($pos !== false) {
+                return substr($normPath, $pos);
+            }
         }
-        $posInc = strpos($normPath, 'wp-includes');
-        if ($posInc !== false) {
-            return substr($normPath, $posInc);
-        }
-        $posAdm = strpos($normPath, 'wp-admin');
-        if ($posAdm !== false) {
-            return substr($normPath, $posAdm);
-        }
-
         return basename($normPath);
     }
 
     public static function extractEvidenceLines($content, $maxLines = 12, $rootDir = '') {
         $redacted = ZS_Gemini::redact($content, $rootDir);
-
-        // Check if redaction succeeded for secrets
-        if (stripos($redacted, 'DB_PASSWORD') !== false && !preg_match("/\[REDACTED\]/", $redacted)) {
-            return ''; // Omit evidence rather than leak
+        if (stripos($redacted, 'DB_PASSWORD') !== false && strpos($redacted, '[REDACTED]') === false) {
+            return '';
         }
-
         $lines = explode("\n", $redacted);
         $nonEmpty = array();
         foreach ($lines as $l) {
@@ -85,110 +106,57 @@ class ZS_Share {
                 }
             }
         }
-
         return implode("\n", $nonEmpty);
     }
 
-    public static function buildMarkdownReport($bundle, $githubRepo = 'OWNER/REPO') {
+    public static function buildMarkdownReport($bundle, $githubRepo = '') {
         $md = "### ZeroShell Malware Report\n\n";
         $md .= "- **Scanner:** ZeroShell v1.0.0\n";
-        $md .= "- **Total Threats Detected:** " . intval($bundle['total_items']) . "\n\n";
-
-        $md .= "| Relative Path | Detection Reason | Normalized SHA256 |\n";
-        $md .= "|---|---|---|\n";
-
+        $md .= "- **Selected findings:** " . intval($bundle['total_items']) . "\n\n";
+        $md .= "| Relative Path | Rule IDs | Status | Raw SHA256 |\n|---|---|---|---|\n";
         foreach ($bundle['items'] as $item) {
-            $safePath = htmlspecialchars($item['rel_path']);
-            $safeReason = htmlspecialchars($item['reason']);
-            $norm = $item['norm_sha256'];
-            $md .= "| `{$safePath}` | {$safeReason} | `{$norm}` |\n";
+            $ids = !empty($item['rule_ids']) ? implode(', ', $item['rule_ids']) : '-';
+            $md .= '| `' . str_replace('|', '/', $item['rel_path']) . '` | ' . $ids . ' | ' . $item['status'] . ' | `' . $item['raw_sha256'] . "` |\n";
         }
-
-        $md .= "\n<details><summary>Short Redacted Evidence</summary>\n\n";
-        foreach ($bundle['items'] as $item) {
-            if (!empty($item['evidence'])) {
-                $md .= "```php\n// File: " . $item['rel_path'] . "\n" . $item['evidence'] . "\n```\n\n";
-            }
-        }
-        $md .= "</details>\n";
-
         return $md;
     }
 
-    public static function getGithubShareData($bundle, $githubRepo = 'OWNER/REPO') {
-        $repo = !empty($githubRepo) ? $githubRepo : 'OWNER/REPO';
-        $title = "Malware Signature Submission: " . count($bundle['items']) . " threats detected";
+    public static function getGithubShareData($bundle, $githubRepo = '') {
+        $repo = trim((string)$githubRepo);
+        $title = 'Malware signature submission: ' . count($bundle['items']) . ' findings';
         $body = self::buildMarkdownReport($bundle, $repo);
-
-        $baseUrl = "https://github.com/{$repo}/issues/new";
-        $fullUrl = $baseUrl . '?title=' . urlencode($title) . '&body=' . urlencode($body);
-
-        if (strlen($fullUrl) < 1500) {
+        if ($repo === '' || strpos($repo, 'OWNER/REPO') !== false) {
             return array(
-                'url'            => $fullUrl,
+                'url'            => '',
                 'body'           => $body,
-                'need_clipboard' => false,
+                'need_clipboard' => true,
             );
         }
-
-        return array(
-            'url'            => $baseUrl . '?title=' . urlencode($title),
-            'body'           => $body,
-            'need_clipboard' => true,
-        );
+        $baseUrl = 'https://github.com/' . $repo . '/issues/new';
+        $fullUrl = $baseUrl . '?title=' . rawurlencode($title) . '&body=' . rawurlencode($body);
+        if (strlen($fullUrl) < 1500) {
+            return array('url' => $fullUrl, 'body' => $body, 'need_clipboard' => false);
+        }
+        return array('url' => $baseUrl . '?title=' . rawurlencode($title), 'body' => $body, 'need_clipboard' => true);
     }
 
     public static function submitToMaintainer($bundle, $reportEndpoint, $hasExplicitConsent, $includeSamples = false, $quarantineDir = '') {
         if (!$hasExplicitConsent) {
             return array('success' => false, 'message' => 'Submission refused: explicit consent not given.');
         }
-
         if (empty($reportEndpoint)) {
-            return array('success' => false, 'message' => 'No maintainer report endpoint configured.');
+            return array('success' => false, 'message' => 'No maintainer report endpoint configured. Download the JSON instead.');
         }
-
-        // Validate HTTPS and single host
         $parts = parse_url($reportEndpoint);
-        if (!isset($parts['scheme']) || strtolower($parts['scheme']) !== 'https') {
-            return array('success' => false, 'message' => 'Endpoint must use HTTPS.');
+        if (!isset($parts['scheme']) || strtolower($parts['scheme']) !== 'https' || empty($parts['host'])) {
+            return array('success' => false, 'message' => 'Endpoint must be a valid HTTPS URL.');
         }
-        if (empty($parts['host'])) {
-            return array('success' => false, 'message' => 'Invalid endpoint URL.');
-        }
-
-        $payload = array(
-            'bundle'   => $bundle,
-            'samples'  => array(),
-        );
-
-        if ($includeSamples && !empty($quarantineDir) && is_dir($quarantineDir)) {
-            $manifest = ZS_Quarantine::getManifest($quarantineDir);
-            foreach ($manifest as $backupName => $meta) {
-                $backupFile = $quarantineDir . '/' . $backupName;
-                if (file_exists($backupFile) && filesize($backupFile) <= 1024 * 512) { // 512KB sample cap
-                    $content = @file_get_contents($backupFile);
-                    if ($content !== false) {
-                        $payload['samples'][] = array(
-                            'filename'    => $backupName,
-                            'raw_sha256'  => isset($meta['raw_sha256']) ? $meta['raw_sha256'] : '',
-                            'b64_content' => base64_encode($content),
-                        );
-                    }
-                }
-            }
-        }
-
-        $jsonPayload = json_encode($payload);
-        $headers = array(
-            'Content-Type: application/json',
-            'User-Agent: ZeroShell-Cleaner/1.0',
-        );
-
-        $res = ZS_Gemini::executeHttpRequest($reportEndpoint, $headers, $jsonPayload);
+        $jsonPayload = json_encode($bundle);
+        $headers = array('Content-Type: application/json', 'User-Agent: ZeroShell-Cleaner/1.0');
+        $res = ZS_Gemini::executeHttpRequest($reportEndpoint, $headers, $jsonPayload, 'POST');
         if (isset($res['status']) && $res['status'] >= 200 && $res['status'] < 300) {
-            return array('success' => true, 'receipt' => $res['body']);
+            return array('success' => true, 'receipt' => substr((string)$res['body'], 0, 500));
         }
-
         return array('success' => false, 'message' => 'Server response status ' . (isset($res['status']) ? $res['status'] : 0));
     }
 }

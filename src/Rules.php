@@ -54,12 +54,17 @@ class ZS_Rules {
             return false;
         }
 
+        if (in_array($type, array('literal_contains', 'regex', 'normalized_hash'), true)) {
+            if (!isset($rule['pattern']) || !is_string($rule['pattern']) || $rule['pattern'] === '') {
+                return false;
+            }
+        }
+
         if (isset($rule['pattern'])) {
             if (strlen($rule['pattern']) > 2048) {
                 return false;
             }
             if ($type === 'regex') {
-                // Reject /e modifier
                 $pattern = $rule['pattern'];
                 if (preg_match('/\/[a-zA-Z]*e[a-zA-Z]*$/', $pattern)) {
                     return false;
@@ -73,13 +78,20 @@ class ZS_Rules {
         return true;
     }
 
+    public static function digest($rules) {
+        return substr(hash('sha256', json_encode($rules)), 0, 16);
+    }
+
     public static function validatePayload($rawJson) {
         if (!is_string($rawJson) || strlen($rawJson) > 512 * 1024) {
             return false;
         }
 
         $data = @json_decode($rawJson, true);
-        if (!is_array($data) || !isset($data['schema_version'])) {
+        if (!is_array($data) || !isset($data['schema_version']) || !is_numeric($data['schema_version'])) {
+            return false;
+        }
+        if (intval($data['schema_version']) < 1) {
             return false;
         }
 
@@ -179,5 +191,37 @@ class ZS_Rules {
         }
 
         return $rules;
+    }
+
+    public static function syncFromUrl($url, $dataDir) {
+        $url = trim((string)$url);
+        if ($url === '') {
+            return array('success' => false, 'message' => 'No URL specified.');
+        }
+        $parts = parse_url($url);
+        if (!isset($parts['scheme']) || strtolower($parts['scheme']) !== 'https' || empty($parts['host'])) {
+            return array('success' => false, 'message' => 'Rules sync URL must be HTTPS with a valid host.');
+        }
+        $headers = array('Accept: application/json', 'User-Agent: ZeroShell-Cleaner/1.0');
+        $res = ZS_Gemini::executeHttpRequest($url, $headers, '', 'GET');
+        $status = isset($res['status']) ? intval($res['status']) : 0;
+        if ($status < 200 || $status >= 300) {
+            return array('success' => false, 'message' => 'HTTP request failed with status ' . $status);
+        }
+        $body = isset($res['body']) ? $res['body'] : '';
+        if (strlen($body) > 512 * 1024) {
+            return array('success' => false, 'message' => 'Rules payload exceeds maximum size of 512KB.');
+        }
+        $validated = self::validatePayload($body);
+        if ($validated === false) {
+            return array('success' => false, 'message' => 'Invalid rules JSON payload.');
+        }
+        $overrideFile = rtrim($dataDir, '/\\') . '/rules_override.json';
+        if (!ZS_Config::atomicWrite($overrideFile, $body, 0600)) {
+            return array('success' => false, 'message' => 'Failed to save rules override file.');
+        }
+        $newRules = self::load(null, $dataDir);
+        $newDigest = self::digest($newRules);
+        return array('success' => true, 'digest' => $newDigest, 'message' => 'Rules successfully updated.');
     }
 }

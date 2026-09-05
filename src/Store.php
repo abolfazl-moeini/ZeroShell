@@ -1,6 +1,7 @@
 <?php
 class ZS_Store {
     private $dataDir;
+    public $lastError = '';
 
     public function __construct($dataDir = null) {
         if ($dataDir === null) {
@@ -10,31 +11,148 @@ class ZS_Store {
         ZS_Config::initDataDir($this->dataDir);
     }
 
+    public function getDataDir() {
+        return $this->dataDir;
+    }
+
     public function getSessionFile() {
-        return $this->dataDir . '/malware_scan_session.json';
+        return $this->dataDir . '/session.php';
     }
 
     public function getKnowledgeFile() {
-        return $this->dataDir . '/malware_cleaner_knowledge.json';
+        return $this->dataDir . '/knowledge.php';
     }
 
-    public function withLock($file, $mode, $callback) {
-        $fp = @fopen($file, file_exists($file) ? 'c+' : 'w+');
+    private function lockFile($kind) {
+        return $this->dataDir . '/.lock_' . $kind;
+    }
+
+    public function withNamedLock($kind, $callback) {
+        if (!ZS_Config::secureMkdir($this->dataDir)) {
+            $this->lastError = 'Data directory is not writable.';
+            return false;
+        }
+        $lockPath = $this->lockFile($kind);
+        $fp = @fopen($lockPath, 'c+');
         if (!$fp) {
+            $this->lastError = 'Unable to open lock file.';
             return false;
         }
-
-        $lockMode = ($mode === 'write') ? LOCK_EX : LOCK_SH;
-        if (!flock($fp, $lockMode)) {
+        if (!flock($fp, LOCK_EX)) {
             fclose($fp);
+            $this->lastError = 'Unable to acquire lock.';
             return false;
         }
-
-        $result = call_user_func($callback, $fp);
-
+        $ok = false;
+        try {
+            $ok = call_user_func($callback);
+        } catch (Exception $e) {
+            $this->lastError = $e->getMessage();
+            $ok = false;
+        }
         flock($fp, LOCK_UN);
         fclose($fp);
-        return $result;
+        return $ok;
+    }
+
+    private function defaultKnowledge() {
+        return array(
+            'schema_version'     => 2,
+            'trusted'            => array(),
+            'candidates'         => array(),
+            'ai_cache'           => array(),
+            'legacy_unverified'  => array(),
+            'login_attempts'     => array(),
+            'key_cooldowns'      => array(),
+            'auto_review'        => self::defaultAutoReview(),
+        );
+    }
+
+    public static function defaultAutoReview() {
+        return array(
+            'status'      => 'idle',
+            'job_id'      => '',
+            'stats'       => array(
+                'pending'     => 0,
+                'processing'  => 0,
+                'skipped'     => 0,
+                'cache_hits'  => 0,
+                'failures'    => 0,
+                'quarantined' => 0,
+                'restored'    => 0,
+            ),
+            'updated_at'  => 0,
+        );
+    }
+
+    private function defaultSession($rootDir) {
+        return array(
+            'scan_session_id'  => bin2hex(random_bytes(16)),
+            'generation'       => 1,
+            'dir_queue'        => array($rootDir),
+            'dir_cursor'       => array('dir' => '', 'offset' => 0, 'names' => array()),
+            'visited_dirs'     => array(),
+            'scanned_files'    => 0,
+            'scanned_dirs'     => 0,
+            'trusted_bypassed' => 0,
+            'skipped_unreadable' => 0,
+            'skipped_symlink'  => 0,
+            'skipped_large'    => 0,
+            'coverage_partial' => 0,
+            'infected_files'   => array(),
+            'start_time'       => time(),
+            'is_completed'     => false,
+            'current_dir'      => $rootDir,
+            'auto_review'      => self::defaultAutoReview(),
+        );
+    }
+
+    private function migrateKnowledge($data) {
+        if (!is_array($data)) {
+            return $this->defaultKnowledge();
+        }
+        if (isset($data['schema_version']) && intval($data['schema_version']) >= 2) {
+            $base = $this->defaultKnowledge();
+            return array_merge($base, $data);
+        }
+        $legacy = array();
+        foreach (array('trusted', 'candidates', 'ai_cache') as $section) {
+            if (!empty($data[$section]) && is_array($data[$section])) {
+                $legacy[$section] = $data[$section];
+            }
+        }
+        $out = $this->defaultKnowledge();
+        $out['legacy_unverified'] = $legacy;
+        return $out;
+    }
+
+    private function readJsonFile($path) {
+        if (!file_exists($path)) {
+            return null;
+        }
+        $raw = @file_get_contents($path);
+        if ($raw === false) {
+            $this->lastError = 'Unable to read ' . basename($path);
+            return false;
+        }
+        if (trim($raw) === '') {
+            $this->lastError = basename($path) . ' is empty.';
+            return false;
+        }
+        $data = ZS_Config::unwrapJson($raw);
+        if (!is_array($data)) {
+            $decoded = json_decode($raw, true);
+            if (is_array($decoded)) {
+                return $decoded;
+            }
+            $this->lastError = basename($path) . ' is corrupt.';
+            return false;
+        }
+        return $data;
+    }
+
+    public function writeJsonFile($path, $data) {
+        return ZS_Config::atomicWrite($path, ZS_Config::wrapJson($data), 0600);
     }
 
     public function loadKnowledge() {
@@ -42,35 +160,67 @@ class ZS_Store {
         if (!file_exists($file)) {
             return $this->defaultKnowledge();
         }
-
-        $content = @file_get_contents($file);
-        $data = @json_decode($content, true);
-        if (!is_array($data)) {
+        $data = $this->readJsonFile($file);
+        if ($data === false) {
+            return false;
+        }
+        if ($data === null) {
             return $this->defaultKnowledge();
         }
-
-        return array_merge($this->defaultKnowledge(), $data);
-    }
-
-    private function defaultKnowledge() {
-        return array(
-            'schema_version' => 1,
-            'trusted'        => array(),
-            'candidates'     => array(),
-            'ai_cache'       => array(),
-        );
+        return $this->migrateKnowledge($data);
     }
 
     public function saveKnowledge($data) {
         $file = $this->getKnowledgeFile();
-        return $this->withLock($file, 'write', function($fp) use ($data) {
-            ftruncate($fp, 0);
-            rewind($fp);
-            $json = json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
-            fwrite($fp, $json);
-            fflush($fp);
+        $store = $this;
+        $ok = $this->withNamedLock('knowledge', function () use ($store, $file, $data) {
+            return $store->writeJsonFile($file, $data);
+        });
+        return $ok ? true : false;
+    }
+
+    public function mutateKnowledge($mutator) {
+        $file = $this->getKnowledgeFile();
+        $store = $this;
+        $result = null;
+        $ok = $this->withNamedLock('knowledge', function () use ($store, $file, $mutator, &$result) {
+            $data = $store->loadKnowledgeUnlocked();
+            if ($data === false) {
+                return false;
+            }
+            $result = call_user_func($mutator, $data);
+            if (is_array($result) && isset($result['_knowledge'])) {
+                $data = $result['_knowledge'];
+                unset($result['_knowledge']);
+            } elseif (is_array($result) && isset($result['schema_version'])) {
+                $data = $result;
+                $result = array('ok' => true);
+            }
+            if (!$store->writeJsonFile($file, $data)) {
+                $store->lastError = 'Failed to write knowledge file.';
+                return false;
+            }
             return true;
         });
+        if ($ok === false) {
+            return false;
+        }
+        return $result;
+    }
+
+    public function loadKnowledgeUnlocked() {
+        $file = $this->getKnowledgeFile();
+        if (!file_exists($file)) {
+            return $this->defaultKnowledge();
+        }
+        $data = $this->readJsonFile($file);
+        if ($data === false) {
+            return false;
+        }
+        if ($data === null) {
+            return $this->defaultKnowledge();
+        }
+        return $this->migrateKnowledge($data);
     }
 
     public function loadSession() {
@@ -78,22 +228,64 @@ class ZS_Store {
         if (!file_exists($file)) {
             return null;
         }
-
-        $content = @file_get_contents($file);
-        $data = @json_decode($content, true);
+        $data = $this->readJsonFile($file);
+        if ($data === false) {
+            return false;
+        }
         return is_array($data) ? $data : null;
     }
 
     public function saveSession($session) {
         $file = $this->getSessionFile();
-        return $this->withLock($file, 'write', function($fp) use ($session) {
-            ftruncate($fp, 0);
-            rewind($fp);
-            $json = json_encode($session, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
-            fwrite($fp, $json);
-            fflush($fp);
+        $store = $this;
+        return $this->withNamedLock('session', function () use ($store, $file, $session) {
+            return $store->writeJsonFile($file, $session);
+        }) ? true : false;
+    }
+
+    public function mutateSession($mutator) {
+        $file = $this->getSessionFile();
+        $store = $this;
+        $result = null;
+        $ok = $this->withNamedLock('session', function () use ($store, $file, $mutator, &$result) {
+            $session = $store->loadSessionUnlocked();
+            if ($session === false) {
+                return false;
+            }
+            $out = call_user_func($mutator, $session);
+            if (!is_array($out)) {
+                return false;
+            }
+            if (isset($out['_session'])) {
+                $session = $out['_session'];
+                $result = $out;
+                unset($result['_session']);
+            } else {
+                $session = $out;
+                $result = $session;
+            }
+            if (!$store->writeJsonFile($file, $session)) {
+                $store->lastError = 'Failed to write session file.';
+                return false;
+            }
             return true;
         });
+        if ($ok === false) {
+            return false;
+        }
+        return $result;
+    }
+
+    public function loadSessionUnlocked() {
+        $file = $this->getSessionFile();
+        if (!file_exists($file)) {
+            return null;
+        }
+        $data = $this->readJsonFile($file);
+        if ($data === false) {
+            return false;
+        }
+        return is_array($data) ? $data : null;
     }
 
     public function initSession($rootDir, $reset = false) {
@@ -102,24 +294,17 @@ class ZS_Store {
         }
 
         $session = $this->loadSession();
+        if ($session === false) {
+            return false;
+        }
         if ($session !== null) {
             return $session;
         }
 
-        $sessionId = bin2hex(random_bytes(16));
-        $session = array(
-            'scan_session_id'  => $sessionId,
-            'dir_queue'        => array($rootDir),
-            'scanned_files'    => 0,
-            'scanned_dirs'     => 0,
-            'trusted_bypassed' => 0,
-            'infected_files'   => array(),
-            'start_time'       => time(),
-            'is_completed'     => false,
-            'current_dir'      => $rootDir,
-        );
-
-        $this->saveSession($session);
+        $session = $this->defaultSession($rootDir);
+        if (!$this->saveSession($session)) {
+            return false;
+        }
         return $session;
     }
 
@@ -128,158 +313,133 @@ class ZS_Store {
         if (file_exists($file)) {
             @unlink($file);
         }
+        $legacy = $this->dataDir . '/malware_scan_session.json';
+        if (file_exists($legacy)) {
+            @unlink($legacy);
+        }
     }
 
-    public function isTrusted($normHash) {
+    public function isTrusted($rawHash) {
         $knowledge = $this->loadKnowledge();
-        return isset($knowledge['trusted'][$normHash]);
+        if (!is_array($knowledge)) {
+            return false;
+        }
+        return isset($knowledge['trusted'][$rawHash]);
     }
 
-    public function getCandidate($normHash) {
+    public function getCandidate($rawHash) {
         $knowledge = $this->loadKnowledge();
-        return isset($knowledge['candidates'][$normHash]) ? $knowledge['candidates'][$normHash] : null;
+        if (!is_array($knowledge)) {
+            return null;
+        }
+        return isset($knowledge['candidates'][$rawHash]) ? $knowledge['candidates'][$rawHash] : null;
     }
 
-    public function markClean($normHash, $path, $scanSessionId) {
-        $file = $this->getKnowledgeFile();
+    public function markClean($rawHash, $path, $scanSessionId) {
         $store = $this;
-
-        return $this->withLock($file, 'write', function($fp) use ($store, $normHash, $path, $scanSessionId) {
-            rewind($fp);
-            $content = stream_get_contents($fp);
-            $knowledge = @json_decode($content, true);
+        $out = array('status' => 'error');
+        $ok = $this->withNamedLock('knowledge', function () use ($store, $rawHash, $path, $scanSessionId, &$out) {
+            $knowledge = $store->loadKnowledgeUnlocked();
             if (!is_array($knowledge)) {
-                $knowledge = array(
-                    'schema_version' => 1,
-                    'trusted'        => array(),
-                    'candidates'     => array(),
-                    'ai_cache'       => array(),
-                );
+                return false;
             }
-
-            if (isset($knowledge['trusted'][$normHash])) {
-                return array('status' => 'already_trusted');
+            if (isset($knowledge['trusted'][$rawHash])) {
+                $out = array('status' => 'already_trusted');
+                return true;
             }
-
-            if (isset($knowledge['candidates'][$normHash])) {
-                $cand = $knowledge['candidates'][$normHash];
+            if (isset($knowledge['candidates'][$rawHash])) {
+                $cand = $knowledge['candidates'][$rawHash];
                 $candPath = isset($cand['first_path']) ? $cand['first_path'] : '';
                 $candSession = isset($cand['first_session_id']) ? $cand['first_session_id'] : '';
-
                 if ($candPath !== $path || $candSession !== $scanSessionId) {
-                    // Strike 2! Promote to trusted
-                    unset($knowledge['candidates'][$normHash]);
-                    $knowledge['trusted'][$normHash] = array(
+                    unset($knowledge['candidates'][$rawHash]);
+                    $knowledge['trusted'][$rawHash] = array(
                         'clean_count' => 2,
                         'first_path'  => $candPath,
                         'second_path' => $path,
                         'trusted_at'  => time(),
                     );
-
-                    ftruncate($fp, 0);
-                    rewind($fp);
-                    fwrite($fp, json_encode($knowledge, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
-                    fflush($fp);
-
-                    // Update infected items in current session
-                    $store->markSessionItemsTrusted($normHash);
-
-                    return array('status' => 'promoted_to_trusted');
-                } else {
-                    return array('status' => 'candidate_already_recorded');
+                    if (!$store->writeJsonFile($store->getKnowledgeFile(), $knowledge)) {
+                        return false;
+                    }
+                    $store->markSessionItemsTrusted($rawHash);
+                    $out = array('status' => 'promoted_to_trusted');
+                    return true;
                 }
+                $out = array('status' => 'candidate_already_recorded');
+                return true;
             }
 
-            // First strike
-            $knowledge['candidates'][$normHash] = array(
+            $knowledge['candidates'][$rawHash] = array(
                 'clean_count'      => 1,
                 'first_path'       => $path,
                 'first_session_id' => $scanSessionId,
                 'first_at'         => time(),
             );
-
-            ftruncate($fp, 0);
-            rewind($fp);
-            fwrite($fp, json_encode($knowledge, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
-            fflush($fp);
-
-            return array('status' => 'candidate_added');
+            if (!$store->writeJsonFile($store->getKnowledgeFile(), $knowledge)) {
+                return false;
+            }
+            $out = array('status' => 'candidate_added');
+            return true;
         });
+        if ($ok === false) {
+            return array('status' => 'error', 'message' => $this->lastError);
+        }
+        return $out;
     }
 
-    public function markSessionItemsTrusted($normHash) {
-        $file = $this->getSessionFile();
-        if (!file_exists($file)) {
-            return;
-        }
-
-        $this->withLock($file, 'write', function($fp) use ($normHash) {
-            rewind($fp);
-            $content = stream_get_contents($fp);
-            $session = @json_decode($content, true);
+    public function markSessionItemsTrusted($rawHash) {
+        $this->mutateSession(function ($session) use ($rawHash) {
             if (!is_array($session) || empty($session['infected_files'])) {
-                return;
+                return $session;
             }
-
-            $changed = false;
             foreach ($session['infected_files'] as &$inf) {
-                if (isset($inf['norm_sha256']) && $inf['norm_sha256'] === $normHash) {
-                    if ($inf['status'] === 'FOUND') {
+                if (isset($inf['raw_sha256']) && $inf['raw_sha256'] === $rawHash) {
+                    if (!isset($inf['status']) || $inf['status'] === 'FOUND' || $inf['status'] === 'AI_SKIPPED' || $inf['status'] === 'AI_ERROR' || $inf['status'] === 'AI_PROCESSING') {
                         $inf['status'] = 'TRUSTED_HIDDEN';
-                        $changed = true;
                     }
                 }
             }
-
-            if ($changed) {
-                ftruncate($fp, 0);
-                rewind($fp);
-                fwrite($fp, json_encode($session, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
-                fflush($fp);
-            }
+            unset($inf);
+            return $session;
         });
     }
 
-    public function revokeCandidate($normHash) {
-        $file = $this->getKnowledgeFile();
-        return $this->withLock($file, 'write', function($fp) use ($normHash) {
-            rewind($fp);
-            $content = stream_get_contents($fp);
-            $knowledge = @json_decode($content, true);
-            if (!is_array($knowledge) || !isset($knowledge['candidates'][$normHash])) {
-                return false;
+    public function revokeCandidate($rawHash) {
+        $store = $this;
+        $removed = false;
+        $this->withNamedLock('knowledge', function () use ($store, $rawHash, &$removed) {
+            $knowledge = $store->loadKnowledgeUnlocked();
+            if (!is_array($knowledge) || !isset($knowledge['candidates'][$rawHash])) {
+                return true;
             }
-
-            unset($knowledge['candidates'][$normHash]);
-            ftruncate($fp, 0);
-            rewind($fp);
-            fwrite($fp, json_encode($knowledge, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
-            fflush($fp);
-            return true;
+            unset($knowledge['candidates'][$rawHash]);
+            $removed = true;
+            return $store->writeJsonFile($store->getKnowledgeFile(), $knowledge);
         });
+        return $removed;
     }
 
-    public function revokeTrusted($normHash) {
-        $file = $this->getKnowledgeFile();
-        return $this->withLock($file, 'write', function($fp) use ($normHash) {
-            rewind($fp);
-            $content = stream_get_contents($fp);
-            $knowledge = @json_decode($content, true);
-            if (!is_array($knowledge) || !isset($knowledge['trusted'][$normHash])) {
-                return false;
+    public function revokeTrusted($rawHash) {
+        $store = $this;
+        $removed = false;
+        $this->withNamedLock('knowledge', function () use ($store, $rawHash, &$removed) {
+            $knowledge = $store->loadKnowledgeUnlocked();
+            if (!is_array($knowledge) || !isset($knowledge['trusted'][$rawHash])) {
+                return true;
             }
-
-            unset($knowledge['trusted'][$normHash]);
-            ftruncate($fp, 0);
-            rewind($fp);
-            fwrite($fp, json_encode($knowledge, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
-            fflush($fp);
-            return true;
+            unset($knowledge['trusted'][$rawHash]);
+            $removed = true;
+            return $store->writeJsonFile($store->getKnowledgeFile(), $knowledge);
         });
+        return $removed;
     }
 
     public function getAiCache($cacheKey) {
         $knowledge = $this->loadKnowledge();
+        if (!is_array($knowledge)) {
+            return null;
+        }
         if (isset($knowledge['ai_cache'][$cacheKey])) {
             return $knowledge['ai_cache'][$cacheKey];
         }
@@ -287,116 +447,191 @@ class ZS_Store {
     }
 
     public function setAiCache($cacheKey, $verdictData) {
-        $file = $this->getKnowledgeFile();
-        return $this->withLock($file, 'write', function($fp) use ($cacheKey, $verdictData) {
-            rewind($fp);
-            $content = stream_get_contents($fp);
-            $knowledge = @json_decode($content, true);
+        $store = $this;
+        return $this->withNamedLock('knowledge', function () use ($store, $cacheKey, $verdictData) {
+            $knowledge = $store->loadKnowledgeUnlocked();
             if (!is_array($knowledge)) {
-                $knowledge = array(
-                    'schema_version' => 1,
-                    'trusted'        => array(),
-                    'candidates'     => array(),
-                    'ai_cache'       => array(),
-                );
+                return false;
             }
-
             $knowledge['ai_cache'][$cacheKey] = $verdictData;
-            ftruncate($fp, 0);
-            rewind($fp);
-            fwrite($fp, json_encode($knowledge, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
-            fflush($fp);
-            return true;
-        });
+            return $store->writeJsonFile($store->getKnowledgeFile(), $knowledge);
+        }) ? true : false;
     }
 
     public function clearAiCache() {
-        $file = $this->getKnowledgeFile();
-        return $this->withLock($file, 'write', function($fp) {
-            rewind($fp);
-            $content = stream_get_contents($fp);
-            $knowledge = @json_decode($content, true);
+        $store = $this;
+        return $this->withNamedLock('knowledge', function () use ($store) {
+            $knowledge = $store->loadKnowledgeUnlocked();
             if (!is_array($knowledge)) {
-                return true;
+                return false;
             }
-
             $knowledge['ai_cache'] = array();
-            ftruncate($fp, 0);
-            rewind($fp);
-            fwrite($fp, json_encode($knowledge, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
-            fflush($fp);
-            return true;
-        });
+            return $store->writeJsonFile($store->getKnowledgeFile(), $knowledge);
+        }) ? true : false;
     }
 
-    public function claimNextInfectedForAutoReview() {
-        $file = $this->getSessionFile();
-        if (!file_exists($file)) {
+    public function findInfected($session, $findingId) {
+        if (!is_array($session) || empty($session['infected_files'])) {
             return null;
         }
-
-        return $this->withLock($file, 'write', function($fp) {
-            rewind($fp);
-            $content = stream_get_contents($fp);
-            $session = @json_decode($content, true);
-            if (!is_array($session) || empty($session['infected_files'])) {
-                return null;
+        foreach ($session['infected_files'] as $idx => $inf) {
+            if (isset($inf['finding_id']) && $inf['finding_id'] === $findingId) {
+                return array('index' => $idx, 'item' => $inf);
             }
+        }
+        return null;
+    }
 
-            $claimed = null;
-            $claimedIdx = -1;
+    public function claimNextInfectedForAutoReview($jobId = '') {
+        $store = $this;
+        $claimed = null;
+        $ok = $this->withNamedLock('session', function () use ($store, $jobId, &$claimed) {
+            $session = $store->loadSessionUnlocked();
+            if (!is_array($session) || empty($session['infected_files'])) {
+                return true;
+            }
             $now = time();
             $staleAfter = 90;
-
+            $generation = isset($session['generation']) ? intval($session['generation']) : 1;
             foreach ($session['infected_files'] as $idx => $inf) {
                 $status = isset($inf['status']) ? $inf['status'] : '';
                 $claimedAt = isset($inf['ai_claimed_at']) ? intval($inf['ai_claimed_at']) : 0;
                 $isFound = ($status === 'FOUND');
                 $isStale = ($status === 'AI_PROCESSING' && ($claimedAt === 0 || ($now - $claimedAt) >= $staleAfter));
                 if ($isFound || $isStale) {
-                    $claimed = $inf;
-                    $claimedIdx = $idx;
+                    $token = bin2hex(random_bytes(16));
                     $session['infected_files'][$idx]['status'] = 'AI_PROCESSING';
                     $session['infected_files'][$idx]['ai_claimed_at'] = $now;
-                    break;
+                    $session['infected_files'][$idx]['claim_token'] = $token;
+                    $session['infected_files'][$idx]['claim_generation'] = $generation;
+                    if ($jobId !== '') {
+                        $session['infected_files'][$idx]['claim_job'] = $jobId;
+                    }
+                    if (!$store->writeJsonFile($store->getSessionFile(), $session)) {
+                        return false;
+                    }
+                    $claimed = array(
+                        'index'      => $idx,
+                        'item'       => $session['infected_files'][$idx],
+                        'token'      => $token,
+                        'generation' => $generation,
+                    );
+                    return true;
                 }
             }
-
-            if ($claimed !== null) {
-                ftruncate($fp, 0);
-                rewind($fp);
-                fwrite($fp, json_encode($session, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
-                fflush($fp);
-                return array('index' => $claimedIdx, 'item' => $claimed);
-            }
-
-            return null;
+            return true;
         });
-    }
-
-    public function updateInfectedItem($index, $updates) {
-        $file = $this->getSessionFile();
-        if (!file_exists($file)) {
+        if ($ok === false) {
             return false;
         }
+        return $claimed;
+    }
 
-        return $this->withLock($file, 'write', function($fp) use ($index, $updates) {
-            rewind($fp);
-            $content = stream_get_contents($fp);
-            $session = @json_decode($content, true);
+    public function updateInfectedItem($index, $updates, $token = null, $generation = null) {
+        $store = $this;
+        $updated = false;
+        $ok = $this->withNamedLock('session', function () use ($store, $index, $updates, $token, $generation, &$updated) {
+            $session = $store->loadSessionUnlocked();
             if (!is_array($session) || !isset($session['infected_files'][$index])) {
-                return false;
+                return true;
             }
-
+            $row = $session['infected_files'][$index];
+            if ($generation !== null && isset($session['generation']) && intval($session['generation']) !== intval($generation)) {
+                $store->lastError = 'Session generation mismatch.';
+                return true;
+            }
+            if ($token !== null && (!isset($row['claim_token']) || !hash_equals((string)$row['claim_token'], (string)$token))) {
+                $store->lastError = 'Claim token mismatch.';
+                return true;
+            }
             foreach ($updates as $k => $v) {
                 $session['infected_files'][$index][$k] = $v;
             }
-
-            ftruncate($fp, 0);
-            rewind($fp);
-            fwrite($fp, json_encode($session, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
-            fflush($fp);
+            if (!$store->writeJsonFile($store->getSessionFile(), $session)) {
+                return false;
+            }
+            $updated = true;
             return true;
         });
+        return $ok && $updated;
+    }
+
+    public function autoReviewStats($session) {
+        $stats = array(
+            'pending'     => 0,
+            'processing'  => 0,
+            'skipped'     => 0,
+            'cache_hits'  => 0,
+            'failures'    => 0,
+            'quarantined' => 0,
+            'restored'    => 0,
+            'trusted'     => 0,
+            'found'       => 0,
+        );
+        if (!is_array($session) || empty($session['infected_files'])) {
+            return $stats;
+        }
+        foreach ($session['infected_files'] as $inf) {
+            $st = isset($inf['status']) ? $inf['status'] : '';
+            if ($st === 'FOUND') {
+                $stats['pending']++;
+                $stats['found']++;
+            } elseif ($st === 'AI_PROCESSING') {
+                $stats['processing']++;
+            } elseif ($st === 'AI_SKIPPED' || $st === 'CHANGED_SINCE_SCAN') {
+                $stats['skipped']++;
+            } elseif ($st === 'AI_ERROR' || $st === 'FAILED_DELETE') {
+                $stats['failures']++;
+            } elseif ($st === 'QUARANTINED' || $st === 'AI_QUARANTINED') {
+                $stats['quarantined']++;
+            } elseif ($st === 'RESTORED') {
+                $stats['restored']++;
+            } elseif ($st === 'TRUSTED_HIDDEN' || $st === 'TRUSTED') {
+                $stats['trusted']++;
+            }
+            if (!empty($inf['ai_cache_hit'])) {
+                $stats['cache_hits']++;
+            }
+        }
+        $stats['hits'] = $stats['cache_hits'];
+        $stats['errors'] = $stats['failures'];
+        return $stats;
+    }
+
+    public function recordKeyCooldown($key, $duration = 60) {
+        $fp = substr(hash('sha256', (string)$key), 0, 16);
+        $until = time() + intval($duration);
+        ZS_Config::$keyCooldowns[$key] = $until;
+        $store = $this;
+        return $this->withNamedLock('knowledge', function () use ($store, $fp, $until) {
+            $k = $store->loadKnowledgeUnlocked();
+            if (!is_array($k)) {
+                return false;
+            }
+            if (!isset($k['key_cooldowns']) || !is_array($k['key_cooldowns'])) {
+                $k['key_cooldowns'] = array();
+            }
+            $k['key_cooldowns'][$fp] = $until;
+            return $store->writeJsonFile($store->getKnowledgeFile(), $k);
+        }) ? true : false;
+    }
+
+    public function isKeyCooling($key) {
+        if (isset(ZS_Config::$keyCooldowns[$key]) && time() < ZS_Config::$keyCooldowns[$key]) {
+            return true;
+        }
+        $k = $this->loadKnowledge();
+        if (!is_array($k) || empty($k['key_cooldowns']) || !is_array($k['key_cooldowns'])) {
+            return false;
+        }
+        $fp = substr(hash('sha256', (string)$key), 0, 16);
+        if (isset($k['key_cooldowns'][$fp])) {
+            $until = intval($k['key_cooldowns'][$fp]);
+            if (time() < $until) {
+                ZS_Config::$keyCooldowns[$key] = $until;
+                return true;
+            }
+        }
+        return false;
     }
 }

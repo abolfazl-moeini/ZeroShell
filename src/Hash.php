@@ -1,7 +1,15 @@
 <?php
 class ZS_Hash {
     public static function raw($content) {
-        return hash('sha256', $content);
+        return hash('sha256', (string)$content);
+    }
+
+    public static function rawFile($path) {
+        if (!is_string($path) || $path === '' || is_link($path) || !is_file($path)) {
+            return false;
+        }
+        $hash = @hash_file('sha256', $path);
+        return is_string($hash) ? $hash : false;
     }
 
     public static function normalized($content) {

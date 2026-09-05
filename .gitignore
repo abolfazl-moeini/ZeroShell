@@ -1,6 +1,14 @@
 malware_cleaner_data/
 wp-content/malware_cleaner_data/
 wp-content/malware_quarantine/
-.DS_Store
+.zsdata_*/
+zs-setup.secret
 *.tmp
 *.log
+.DS_Store
+.phpunit.result.cache
+config.php
+knowledge.php
+session.php
+cooldowns.php
+.lock_*

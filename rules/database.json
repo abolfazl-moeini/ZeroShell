@@ -91,35 +91,40 @@
       "type": "literal_contains",
       "pattern": "koman",
       "name": "WebShell Command Handler (koman)",
-      "reason_key": "sig_koman_cmd"
+      "reason_key": "sig_koman_cmd",
+      "noise": true
     },
     {
       "id": "SIG-FILE-UPLOAD-01",
       "type": "literal_contains",
       "pattern": "fileToUpload",
       "name": "WebShell File Upload Form (fileToUpload)",
-      "reason_key": "sig_file_upload"
+      "reason_key": "sig_file_upload",
+      "noise": true
     },
     {
       "id": "SIG-BIKIN-CREATE-01",
       "type": "literal_contains",
       "pattern": "bikin",
       "name": "Indonesian WebShell Create Handler (bikin)",
-      "reason_key": "sig_bikin_create"
+      "reason_key": "sig_bikin_create",
+      "noise": true
     },
     {
       "id": "SIG-BUATDIR-MKDIR-01",
       "type": "literal_contains",
       "pattern": "buatdir",
       "name": "Indonesian WebShell Mkdir Handler (buatdir)",
-      "reason_key": "sig_buatdir_mkdir"
+      "reason_key": "sig_buatdir_mkdir",
+      "noise": true
     },
     {
       "id": "SIG-PILIHAN-OPT-01",
       "type": "literal_contains",
       "pattern": "pilihan",
       "name": "IndoSec WebShell Option Handler (pilihan)",
-      "reason_key": "sig_pilihan_opt"
+      "reason_key": "sig_pilihan_opt",
+      "noise": true
     },
     {
       "id": "SIG-LOKASIE-PATH-01",

@@ -37,7 +37,7 @@ $faI18n = include $root . '/src/i18n/fa.php';
 $css = file_get_contents($root . '/src/assets/app.css');
 $js  = file_get_contents($root . '/src/assets/app.js');
 
-$output = "<?php\n/**\n * ZeroShell WordPress Malware Scanner & Cleaner\n * Drop-in single-file security cleaner (PHP 7.4+)\n */\n\n";
+$output = "<?php\n/**\n * ZeroShell WordPress Malware Scanner & Cleaner\n * Drop-in single-file security cleaner (PHP 7.4+)\n */\n\nif (!defined('ZS_INTERNAL')) { define('ZS_INTERNAL', true); }\n\n";
 
 foreach ($orderedFiles as $relFile) {
     $fullPath = $root . '/' . $relFile;
@@ -47,13 +47,9 @@ foreach ($orderedFiles as $relFile) {
     }
 
     $content = file_get_contents($fullPath);
-
-    // Strip leading opening php tag
     $content = preg_replace('/^\s*<\?php\s*/', '', $content);
-    // Strip trailing closing tag at the very end of file without literal closing tag
     $content = preg_replace('/\?' . '>\s*$/', '', $content);
 
-    // Perform specific inlining
     if ($relFile === 'src/Rules.php') {
         $inlinedRules = "self::\$bundledCache = " . var_export($rulesData, true) . ";\n        return self::\$bundledCache;\n";
         $content = str_replace('// {{BUNDLED_RULES_DATA}}', $inlinedRules, $content);
@@ -70,7 +66,6 @@ foreach ($orderedFiles as $relFile) {
     if ($relFile === 'src/Ui.php') {
         $inlinedCss = "return " . var_export($css, true) . ";";
         $content = str_replace('// {{INLINED_CSS}}', $inlinedCss, $content);
-
         $inlinedJs = "return " . var_export($js, true) . ";";
         $content = str_replace('// {{INLINED_JS}}', $inlinedJs, $content);
     }
@@ -80,19 +75,39 @@ foreach ($orderedFiles as $relFile) {
     $output .= "\n// --- END {$relFile} ---\n";
 }
 
-$distFile = $distDir . '/malware-cleaner.php';
-$rootFile = $root . '/malware-cleaner.php';
-
-file_put_contents($distFile, $output);
-file_put_contents($rootFile, $output);
-
-echo "Built successfully to:\n - {$distFile}\n - {$rootFile}\n";
-
-// Lint check
-exec('php -l ' . escapeshellarg($rootFile), $lintOutput, $lintStatus);
-if ($lintStatus !== 0) {
-    fwrite(STDERR, "Lint failed on {$rootFile}:\n" . implode("\n", $lintOutput) . "\n");
+$tmpFile = $distDir . '/malware-cleaner.php.tmp.' . bin2hex(random_bytes(4));
+if (file_put_contents($tmpFile, $output) === false) {
+    fwrite(STDERR, "Error: could not write temp artifact\n");
     exit(1);
 }
 
+exec('php -l ' . escapeshellarg($tmpFile), $lintOutput, $lintStatus);
+if ($lintStatus !== 0) {
+    fwrite(STDERR, "Lint failed; previous artifacts left unchanged.\n" . implode("\n", $lintOutput) . "\n");
+    @unlink($tmpFile);
+    exit(1);
+}
+
+$distFile = $distDir . '/malware-cleaner.php';
+$rootFile = $root . '/malware-cleaner.php';
+if (!@rename($tmpFile, $distFile)) {
+    fwrite(STDERR, "Error: could not replace dist artifact\n");
+    @unlink($tmpFile);
+    exit(1);
+}
+if (!@copy($distFile, $rootFile)) {
+    fwrite(STDERR, "Error: could not copy root artifact\n");
+    exit(1);
+}
+
+$second = $distDir . '/malware-cleaner.php.check';
+copy($distFile, $second);
+if (md5_file($distFile) !== md5_file($rootFile)) {
+    @unlink($second);
+    fwrite(STDERR, "Error: dist and root artifacts differ\n");
+    exit(1);
+}
+@unlink($second);
+
+echo "Built successfully to:\n - {$distFile}\n - {$rootFile}\n";
 echo "Syntax check OK (php -l clean)\n";
