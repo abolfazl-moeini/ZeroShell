@@ -1,0 +1,293 @@
+{
+  "schema_version": 1,
+  "hashes": [
+    {
+      "id": "HASH-NIRMALA-01",
+      "sha256": "6a3eb5b8e3f9a0d81b2456387a2f5f9369f052685168090aeb0415ac42e4a1bd",
+      "name": "Nirmala / Hesperion Backdoor Shell",
+      "reason_key": "hash_nirmala"
+    }
+  ],
+  "signatures": [
+    {
+      "id": "SIG-NIRMALA-PAD-01",
+      "type": "literal_contains",
+      "pattern": "NIRMALA-HASH-PAD",
+      "name": "Nirmala Hash Padding Backdoor",
+      "reason_key": "sig_nirmala_padding"
+    },
+    {
+      "id": "SIG-HESPERION-PROT-01",
+      "type": "literal_contains",
+      "pattern": "HESPERION PROTECTED",
+      "name": "Hesperion Protected Encrypted Shell",
+      "reason_key": "sig_hesperion_protected"
+    },
+    {
+      "id": "SIG-CHINESE-PACK-01",
+      "type": "literal_contains",
+      "pattern": "逸诚覆堂",
+      "name": "Chinese Obfuscated Packer Shell",
+      "reason_key": "sig_chinese_packer"
+    },
+    {
+      "id": "SIG-CHINESE-PACK-02",
+      "type": "literal_contains",
+      "pattern": "物为秋",
+      "name": "Chinese Obfuscated Packer Shell",
+      "reason_key": "sig_chinese_packer"
+    },
+    {
+      "id": "SIG-CHINESE-PACK-03",
+      "type": "literal_contains",
+      "pattern": "推莫思",
+      "name": "Chinese Obfuscated Packer Shell",
+      "reason_key": "sig_chinese_packer"
+    },
+    {
+      "id": "SIG-HESPERION-TRAP-01",
+      "type": "literal_contains",
+      "pattern": "exit(\"HESPERION - Runtime check failed\")",
+      "name": "Hesperion Runtime Trap",
+      "reason_key": "sig_hesperion_trap"
+    },
+    {
+      "id": "SIG-NGILER-360-01",
+      "type": "literal_contains",
+      "pattern": "Ngiler SH3LL",
+      "name": "Ngiler WebShell 360",
+      "reason_key": "sig_ngiler_360"
+    },
+    {
+      "id": "SIG-NGILER-FAM-01",
+      "type": "literal_contains",
+      "pattern": "Ngiler",
+      "name": "Ngiler WebShell Family",
+      "reason_key": "sig_ngiler_family"
+    },
+    {
+      "id": "SIG-BENGALI-OBF-01",
+      "type": "literal_contains",
+      "pattern": "\\xe0\\246\\x96",
+      "name": "Bengali Char Path Obfuscation (Ngiler)",
+      "reason_key": "sig_bengali_obf_1"
+    },
+    {
+      "id": "SIG-BENGALI-OBF-02",
+      "type": "literal_contains",
+      "pattern": "\\340\\246\\x95",
+      "name": "Bengali Char Path Obfuscation (Ngiler)",
+      "reason_key": "sig_bengali_obf_2"
+    },
+    {
+      "id": "SIG-BENGALI-OBF-03",
+      "type": "literal_contains",
+      "pattern": "\\340\\xa6\\227",
+      "name": "Bengali Char Path Obfuscation (Ngiler)",
+      "reason_key": "sig_bengali_obf_3"
+    },
+    {
+      "id": "SIG-KOMAN-CMD-01",
+      "type": "literal_contains",
+      "pattern": "koman",
+      "name": "WebShell Command Handler (koman)",
+      "reason_key": "sig_koman_cmd"
+    },
+    {
+      "id": "SIG-FILE-UPLOAD-01",
+      "type": "literal_contains",
+      "pattern": "fileToUpload",
+      "name": "WebShell File Upload Form (fileToUpload)",
+      "reason_key": "sig_file_upload"
+    },
+    {
+      "id": "SIG-BIKIN-CREATE-01",
+      "type": "literal_contains",
+      "pattern": "bikin",
+      "name": "Indonesian WebShell Create Handler (bikin)",
+      "reason_key": "sig_bikin_create"
+    },
+    {
+      "id": "SIG-BUATDIR-MKDIR-01",
+      "type": "literal_contains",
+      "pattern": "buatdir",
+      "name": "Indonesian WebShell Mkdir Handler (buatdir)",
+      "reason_key": "sig_buatdir_mkdir"
+    },
+    {
+      "id": "SIG-PILIHAN-OPT-01",
+      "type": "literal_contains",
+      "pattern": "pilihan",
+      "name": "IndoSec WebShell Option Handler (pilihan)",
+      "reason_key": "sig_pilihan_opt"
+    },
+    {
+      "id": "SIG-LOKASIE-PATH-01",
+      "type": "literal_contains",
+      "pattern": "lokasie",
+      "name": "IndoSec WebShell File Path Handler (lokasie)",
+      "reason_key": "sig_lokasie_path"
+    },
+    {
+      "id": "SIG-LOKNYA-DIR-01",
+      "type": "literal_contains",
+      "pattern": "loknya",
+      "name": "IndoSec WebShell Directory Handler (loknya)",
+      "reason_key": "sig_loknya_dir"
+    },
+    {
+      "id": "SIG-ALFA-DATA-01",
+      "type": "literal_contains",
+      "pattern": "ALFA_DATA",
+      "name": "Alfa Shell Data Folder",
+      "reason_key": "sig_alfa_data"
+    },
+    {
+      "id": "SIG-ALFA-CGI-01",
+      "type": "literal_contains",
+      "pattern": "alfacgiapi",
+      "name": "Alfa CGI Backdoor API",
+      "reason_key": "sig_alfa_cgi"
+    },
+    {
+      "id": "SIG-C99-SHELL-01",
+      "type": "literal_contains",
+      "pattern": "c99shell",
+      "name": "c99 WebShell",
+      "reason_key": "sig_c99_shell"
+    },
+    {
+      "id": "SIG-R57-SHELL-01",
+      "type": "literal_contains",
+      "pattern": "r57shell",
+      "name": "r57 WebShell",
+      "reason_key": "sig_r57_shell"
+    },
+    {
+      "id": "SIG-WSO-SET-01",
+      "type": "literal_contains",
+      "pattern": "WSOset",
+      "name": "WSO WebShell",
+      "reason_key": "sig_wso_set"
+    },
+    {
+      "id": "SIG-FILESMAN-01",
+      "type": "literal_contains",
+      "pattern": "FilesMan",
+      "name": "FilesMan WebShell",
+      "reason_key": "sig_filesman"
+    },
+    {
+      "id": "SIG-DOORWAY-SALT-01",
+      "type": "literal_contains",
+      "pattern": "MjMzOTQ4ODY0NDU3MDQ0OTE3OTUwNTMx",
+      "name": "Doorway Trojan Salt Signature (MjMzOTQ...)",
+      "reason_key": "sig_doorway_salt"
+    },
+    {
+      "id": "SIG-EVAL-GZINFLATE-01",
+      "type": "literal_contains",
+      "pattern": "eval(gzinflate(",
+      "name": "Obfuscated Gzinflate Eval Execution",
+      "reason_key": "sig_eval_gzinflate"
+    },
+    {
+      "id": "SIG-EVAL-BASE64-01",
+      "type": "literal_contains",
+      "pattern": "eval(base64_decode(",
+      "name": "Obfuscated Base64 Eval Execution",
+      "reason_key": "sig_eval_base64"
+    },
+    {
+      "id": "SIG-EVAL-ROT13-01",
+      "type": "literal_contains",
+      "pattern": "eval(str_rot13(",
+      "name": "Obfuscated Rot13 Eval Execution",
+      "reason_key": "sig_eval_rot13"
+    },
+    {
+      "id": "SIG-ASSERT-BASE64-01",
+      "type": "literal_contains",
+      "pattern": "assert(base64_decode(",
+      "name": "Obfuscated Base64 Assert Execution",
+      "reason_key": "sig_assert_base64"
+    },
+    {
+      "id": "SIG-PASSTHRU-BASE64-01",
+      "type": "literal_contains",
+      "pattern": "passthru(base64_decode(",
+      "name": "Obfuscated Base64 Passthru Execution",
+      "reason_key": "sig_passthru_base64"
+    }
+  ],
+  "structural": [
+    {
+      "id": "STRUCT-GOTO-HEX-01",
+      "type": "goto_hex",
+      "min_goto": 5,
+      "min_hex_octal": 10,
+      "name": "Obfuscated Goto-Jumping Control Flow with Hex/Octal Strings",
+      "reason_key": "struct_goto_hex"
+    },
+    {
+      "id": "STRUCT-GOTO-EVAL-01",
+      "type": "goto_eval",
+      "min_goto": 3,
+      "name": "Goto Control-Flow Obfuscated Eval Execution",
+      "reason_key": "struct_goto_eval"
+    },
+    {
+      "id": "STRUCT-ASCII-RANGE-01",
+      "type": "ascii_range_decoder",
+      "pattern": "/(\\\\176|~|\\\\x7e)['\"]\\s*,\\s*['\"](\\\\40|\\\\x20|\\s)/",
+      "name": "Range-Based Reverse ASCII Character Array Decoder (range('~', ' '))",
+      "reason_key": "struct_ascii_range"
+    },
+    {
+      "id": "STRUCT-GOTO-MATH-01",
+      "type": "goto_math_index",
+      "min_goto": 3,
+      "min_math": 5,
+      "name": "Arithmetic Obfuscated Array Indexing with Goto",
+      "reason_key": "struct_goto_math"
+    },
+    {
+      "id": "STRUCT-HEAVY-HEX-01",
+      "type": "heavy_hex_octal",
+      "min_chunks": 9,
+      "name": "Heavy Hex/Octal Obfuscation",
+      "reason_key": "struct_heavy_hex"
+    }
+  ],
+  "paths": [
+    {
+      "id": "PATH-LANGUAGES-FAKE-01",
+      "type": "languages_fake_php",
+      "name": "Fake PHP script in Languages directory (not a valid .l10n.php file)",
+      "reason_key": "path_languages_fake"
+    },
+    {
+      "id": "PATH-UPLOADS-PHP-01",
+      "type": "uploads_php",
+      "name": "Illegal PHP executable in Uploads directory",
+      "reason_key": "path_uploads_php"
+    },
+    {
+      "id": "PATH-ROGUE-CORE-01",
+      "type": "rogue_core_path",
+      "paths": [
+        "wp-includes/SimplePie/src/HTTP/Psr19Client.php",
+        "wp-includes/pomo/post.php"
+      ],
+      "name": "Known Rogue File in WordPress Core",
+      "reason_key": "path_rogue_core"
+    },
+    {
+      "id": "PATH-DOUBLE-EXT-01",
+      "type": "double_extension",
+      "pattern": "/\\.(js|css|png|jpg|jpeg|gif|ico|txt|svg)\\.php$/i",
+      "name": "Dangerous Double Extension",
+      "reason_key": "path_double_ext"
+    }
+  ]
+}

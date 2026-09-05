@@ -1,0 +1,6 @@
+malware_cleaner_data/
+wp-content/malware_cleaner_data/
+wp-content/malware_quarantine/
+.DS_Store
+*.tmp
+*.log
