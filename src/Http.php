@@ -505,7 +505,8 @@ class ZS_Http {
         }
         if ($mustExist) {
             if (!ZS_Config::isRegularFile($path) || ZS_Config::pathHasSymlink($path, $rootDir) || !ZS_Config::isPathWithinRoot($path, $rootDir)) {
-                return array('ok' => false, 'message' => 'File is not a readable regular file inside the site root.', 'code' => 'MISSING');
+                $store->updateInfectedItem($found['index'], array('status' => 'CHANGED_SINCE_SCAN', 'reviewed' => true));
+                return array('ok' => false, 'message' => 'File is not a readable regular file inside the site root.', 'code' => 'MISSING', 'index' => $found['index']);
             }
             $currentRaw = ZS_Hash::rawFile($path);
             $sessionRaw = isset($item['raw_sha256']) ? (string)$item['raw_sha256'] : '';
@@ -576,6 +577,23 @@ class ZS_Http {
     }
 
     private static function actionDeleteSingle($rootDir, $quarantineDir, $store) {
+        $sid = isset($_POST['scan_session_id']) ? trim((string)$_POST['scan_session_id']) : '';
+        $fid = isset($_POST['finding_id']) ? trim((string)$_POST['finding_id']) : '';
+        $session = $store->loadSession();
+        if (is_array($session) && $sid !== '' && isset($session['scan_session_id']) && $session['scan_session_id'] === $sid && $fid !== '') {
+            $found = $store->findInfected($session, $fid);
+            if ($found !== null && isset($found['item']['status']) &&
+                ($found['item']['status'] === 'QUARANTINED' || $found['item']['status'] === 'AI_QUARANTINED')) {
+                $cur = $store->getReviewCursor($session);
+                $newCursor = $store->findNextUnreviewedIndex($session, $cur);
+                self::jsonOk(array(
+                    'message'             => ZS_I18n::t('toast_quarantined'),
+                    'backup_name'         => isset($found['item']['backup_name']) ? $found['item']['backup_name'] : '',
+                    'review_cursor'       => $newCursor,
+                    'already_quarantined' => true,
+                ));
+            }
+        }
         $resolved = self::resolveFinding($store, $rootDir, true);
         if (empty($resolved['ok'])) {
             self::jsonFail(400, $resolved['message'], array('code' => isset($resolved['code']) ? $resolved['code'] : ''));
@@ -586,23 +604,42 @@ class ZS_Http {
         ));
         if ($res['success']) {
             $store->revokeCandidate($resolved['raw']);
-            $store->updateInfectedItem($resolved['index'], array(
-                'status' => 'QUARANTINED',
-                'backup_name' => $res['backup_name'],
-                'reviewed' => true
-            ));
-            $sessAfter = $store->loadSession();
             $newCursor = 0;
-            if (is_array($sessAfter)) {
-                $cur = $store->getReviewCursor($sessAfter);
-                $newCursor = $store->findNextUnreviewedIndex($sessAfter, $cur);
-                $store->setReviewCursor($newCursor);
-            }
+            $store->mutateSession(function ($session) use ($resolved, $res, &$newCursor, $store) {
+                if (!is_array($session)) {
+                    return false;
+                }
+                $idx = $resolved['index'];
+                if (isset($session['infected_files'][$idx])) {
+                    $session['infected_files'][$idx]['status'] = 'QUARANTINED';
+                    $session['infected_files'][$idx]['backup_name'] = $res['backup_name'];
+                    $session['infected_files'][$idx]['reviewed'] = true;
+                }
+                $cur = $store->getReviewCursor($session);
+                $newCursor = $store->findNextUnreviewedIndex($session, $cur);
+                $session['review_cursor'] = $newCursor;
+                return $session;
+            });
             self::jsonOk(array(
                 'message'       => ZS_I18n::t('toast_quarantined'),
                 'backup_name'   => $res['backup_name'],
                 'review_cursor' => $newCursor,
             ));
+        }
+        $sessCheck = $store->loadSession();
+        if (is_array($sessCheck) && $fid !== '') {
+            $foundCheck = $store->findInfected($sessCheck, $fid);
+            if ($foundCheck !== null && isset($foundCheck['item']['status']) &&
+                ($foundCheck['item']['status'] === 'QUARANTINED' || $foundCheck['item']['status'] === 'AI_QUARANTINED')) {
+                $cur = $store->getReviewCursor($sessCheck);
+                $newCursor = $store->findNextUnreviewedIndex($sessCheck, $cur);
+                self::jsonOk(array(
+                    'message'             => ZS_I18n::t('toast_quarantined'),
+                    'backup_name'         => isset($foundCheck['item']['backup_name']) ? $foundCheck['item']['backup_name'] : '',
+                    'review_cursor'       => $newCursor,
+                    'already_quarantined' => true,
+                ));
+            }
         }
         self::jsonFail(500, $res['message']);
     }
@@ -632,14 +669,20 @@ class ZS_Http {
         }
         $sid = $resolved['session']['scan_session_id'];
         $res = $store->markClean($resolved['raw'], $resolved['path'], $sid);
-        $store->updateInfectedItem($resolved['index'], array('reviewed' => true));
-        $sessAfter = $store->loadSession();
         $newCursor = 0;
-        if (is_array($sessAfter)) {
-            $cur = $store->getReviewCursor($sessAfter);
-            $newCursor = $store->findNextUnreviewedIndex($sessAfter, $cur);
-            $store->setReviewCursor($newCursor);
-        }
+        $store->mutateSession(function ($session) use ($resolved, &$newCursor, $store) {
+            if (!is_array($session)) {
+                return false;
+            }
+            $idx = $resolved['index'];
+            if (isset($session['infected_files'][$idx])) {
+                $session['infected_files'][$idx]['reviewed'] = true;
+            }
+            $cur = $store->getReviewCursor($session);
+            $newCursor = $store->findNextUnreviewedIndex($session, $cur);
+            $session['review_cursor'] = $newCursor;
+            return $session;
+        });
         self::jsonOk(array(
             'status'        => $res['status'],
             'message'       => ($res['status'] === 'promoted_to_trusted')

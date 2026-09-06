@@ -1388,6 +1388,15 @@ run_test('F02: resolveFinding strictly rejects altered disk files and forged cli
     $res3 = $m->invoke(null, $store, $tempDir, true);
     assert_true($res3['ok'], 'resolveFinding must succeed when disk and client expected_raw match scan hash');
 
+    // 4. File deleted/missing on disk
+    @unlink($testFile);
+    $res4 = $m->invoke(null, $store, $tempDir, true);
+    assert_false($res4['ok'], 'resolveFinding must fail when disk file is missing');
+    assert_equals('MISSING', $res4['code'], 'Code must be MISSING');
+    $sCheck = $store->loadSession();
+    assert_equals('CHANGED_SINCE_SCAN', $sCheck['infected_files'][0]['status'], 'Missing file must update session status to CHANGED_SINCE_SCAN');
+    assert_true(!empty($sCheck['infected_files'][0]['reviewed']), 'Missing file must be marked reviewed in session');
+
     @unlink($testFile);
     @unlink($store->getSessionFile());
     @unlink($dataDir . '/.lock_session');
@@ -2991,6 +3000,17 @@ run_test('Review navigation: delete_single and mark_clean update reviewed flag a
     assert_equals('QUARANTINED', $s1['infected_files'][0]['status']);
     assert_equals(1, $s1['review_cursor'], 'review_cursor must advance to f2 (index 1)');
 
+    // Repeat delete_single on already-quarantined f1 must succeed gracefully
+    $delRes2 = run_zs_test_worker_action($rootDir, $dataDir, array(
+        'do_action'       => 'delete_single',
+        'scan_session_id' => 'sid_nav_flow',
+        'finding_id'      => 'f1',
+        'expected_raw'    => $raw1,
+    ));
+    assert_true(!empty($delRes2['success']), 'Repeat delete_single on already-quarantined f1 should succeed');
+    assert_true(!empty($delRes2['already_quarantined']), 'Response should indicate already_quarantined');
+    assert_equals(1, $delRes2['review_cursor'], 'review_cursor should remain pointed to next unreviewed index');
+
     // Mark clean f2
     $cleanRes = run_zs_test_worker_action($rootDir, $dataDir, array(
         'do_action'       => 'mark_clean',
@@ -3058,7 +3078,9 @@ function getEl(id) {
             textContent: '',
             disabled: false,
             querySelector: () => null,
-            focus: () => {}
+            focus: () => {},
+            setAttribute: () => {},
+            getAttribute: () => ''
         };
     }
     return elements[id];
@@ -3068,12 +3090,15 @@ let lastAlert = null;
 let fetchResolve;
 let fetchReject;
 let fetchCalls = 0;
+let lastFetchUrl = null;
+let lastFetchOpts = null;
 
 const sandbox = {
     window: { location: { pathname: '/malware-cleaner.php' } },
     document: {
         addEventListener: () => {},
         getElementById: (id) => getEl(id),
+        querySelector: () => null,
         querySelectorAll: () => [],
     },
     localStorage: {
@@ -3081,11 +3106,14 @@ const sandbox = {
         getItem: function(k) { return this.data[k] || null; },
         setItem: function(k, v) { this.data[k] = String(v); }
     },
-    fetch: () => {
+    fetch: (url, opts) => {
         fetchCalls++;
+        lastFetchUrl = url;
+        lastFetchOpts = opts;
         return new Promise((res, rej) => { fetchResolve = res; fetchReject = rej; });
     },
     setTimeout: setTimeout,
+    clearTimeout: clearTimeout,
     alert: (msg) => { lastAlert = msg; },
     FormData: class { append(k, v) { this[k] = v; } },
     AbortController: class { abort() {} },
@@ -3096,6 +3124,7 @@ sandbox.window.document = sandbox.document;
 sandbox.window.localStorage = sandbox.localStorage;
 sandbox.window.fetch = sandbox.fetch;
 sandbox.window.setTimeout = sandbox.setTimeout;
+sandbox.window.clearTimeout = sandbox.clearTimeout;
 sandbox.window.FormData = sandbox.FormData;
 sandbox.window.AbortController = sandbox.AbortController;
 
@@ -3175,6 +3204,144 @@ async function runTests() {
     if (savedState.modal_open !== false || savedState.index !== 0) {
         throw new Error('saveReviewState did not preserve explicit overrides: ' + JSON.stringify(savedState));
     }
+
+    // Case 6: deleteAndNext on already-quarantined item advances to next review file without freezing
+    sandbox.window.REVIEW_ITEMS = [
+        { finding_id: 'f_q1', path: '/q1.php', filename: 'q1.php', status: 'QUARANTINED', reviewed: true, raw_sha256: 'hq1' },
+        { finding_id: 'f_q2', path: '/q2.php', filename: 'q2.php', status: 'FOUND', reviewed: false, raw_sha256: 'hq2' },
+    ];
+    vm.runInContext('currentReviewIndex = 0; decisionsLocked = false; isModalActive = true;', sandbox);
+    lastFetchOpts = null;
+    vm.runInContext('deleteAndNext()', sandbox);
+    const idxCase6 = vm.runInContext('currentReviewIndex', sandbox);
+    const lockedCase6 = vm.runInContext('decisionsLocked', sandbox);
+    if (idxCase6 !== 1) throw new Error('deleteAndNext on already-quarantined item should advance to index 1, got ' + idxCase6);
+    if (lockedCase6) throw new Error('Decisions should not be locked when advancing from already-quarantined item');
+    if (lastFetchOpts && lastFetchOpts.method === 'POST') throw new Error('No POST delete network call should be made for already-quarantined item');
+
+    // Case 7: deleteAndNext skips already-quarantined items in sequential list
+    sandbox.window.REVIEW_ITEMS = [
+        { finding_id: 'f_s1', path: '/s1.php', filename: 's1.php', status: 'FOUND', reviewed: false, raw_sha256: 'hs1' },
+        { finding_id: 'f_s2', path: '/s2.php', filename: 's2.php', status: 'QUARANTINED', reviewed: true, raw_sha256: 'hs2' },
+        { finding_id: 'f_s3', path: '/s3.php', filename: 's3.php', status: 'FOUND', reviewed: false, raw_sha256: 'hs3' },
+    ];
+    vm.runInContext('currentReviewIndex = 0; decisionsLocked = false; isModalActive = true;', sandbox);
+    vm.runInContext('deleteAndNext()', sandbox);
+    fetchResolve({ json: () => Promise.resolve({ success: true, message: 'Quarantined s1' }) });
+    await new Promise(r => setTimeout(r, 40));
+    const idxCase7 = vm.runInContext('currentReviewIndex', sandbox);
+    if (idxCase7 !== 2) throw new Error('deleteAndNext should skip already-quarantined s2 (index 1) and advance to s3 (index 2), got ' + idxCase7);
+
+    // Case 8: server error with CHANGED_SINCE_SCAN updates file status, unlocks decisions, alerts user
+    sandbox.window.REVIEW_ITEMS = [
+        { finding_id: 'f_ch', path: '/ch.php', filename: 'ch.php', status: 'FOUND', reviewed: false, raw_sha256: 'hch' },
+    ];
+    vm.runInContext('currentReviewIndex = 0; decisionsLocked = false;', sandbox);
+    lastAlert = null;
+    vm.runInContext('deleteAndNext()', sandbox);
+    fetchResolve({ json: () => Promise.resolve({ success: false, message: 'File changed since scan.', code: 'CHANGED_SINCE_SCAN' }) });
+    await new Promise(r => setTimeout(r, 40));
+    const lockedCase8 = vm.runInContext('decisionsLocked', sandbox);
+    if (lockedCase8) throw new Error('Decisions must be unlocked after CHANGED_SINCE_SCAN failure');
+    if (sandbox.window.REVIEW_ITEMS[0].status !== 'CHANGED_SINCE_SCAN') throw new Error('Status should be updated to CHANGED_SINCE_SCAN');
+    if (sandbox.window.REVIEW_ITEMS[0].reviewed !== true) throw new Error('File should be marked reviewed on CHANGED_SINCE_SCAN');
+
+    // Case 9: Request timeout AbortError unlocks decisions and alerts with timeout message
+    sandbox.window.REVIEW_ITEMS = [
+        { finding_id: 'f_to', path: '/to.php', filename: 'to.php', status: 'FOUND', reviewed: false, raw_sha256: 'hto' },
+    ];
+    vm.runInContext('currentReviewIndex = 0; decisionsLocked = false;', sandbox);
+    lastAlert = null;
+    vm.runInContext('deleteAndNext()', sandbox);
+    const abortErr = new Error('The operation was aborted');
+    abortErr.name = 'AbortError';
+    fetchReject(abortErr);
+    await new Promise(r => setTimeout(r, 40));
+    const lockedCase9 = vm.runInContext('decisionsLocked', sandbox);
+    if (lockedCase9) throw new Error('Decisions must be unlocked after AbortError/timeout');
+    if (!lastAlert || (lastAlert !== 'err_request_timeout' && lastAlert.indexOf('timed out') === -1)) throw new Error('Expected timeout alert message, got: ' + lastAlert);
+
+    // Case 10: DOM error during delete success handling is caught, decisions unlocked
+    sandbox.window.REVIEW_ITEMS = [
+        { finding_id: 'f_dom', path: '/dom.php', filename: 'dom.php', status: 'FOUND', reviewed: false, raw_sha256: 'hdom', row_id: 'row_bad' },
+        { finding_id: 'f_dom2', path: '/dom2.php', filename: 'dom2.php', status: 'FOUND', reviewed: false, raw_sha256: 'hdom2' },
+    ];
+    const origGetEl = sandbox.document.getElementById;
+    sandbox.document.getElementById = function(id) {
+        if (id === 'statQuarantined') throw new Error('Simulated DOM access error');
+        return origGetEl(id);
+    };
+    vm.runInContext('currentReviewIndex = 0; decisionsLocked = false;', sandbox);
+    vm.runInContext('deleteAndNext()', sandbox);
+    fetchResolve({ json: () => Promise.resolve({ success: true, message: 'Quarantined dom' }) });
+    await new Promise(r => setTimeout(r, 40));
+    sandbox.document.getElementById = origGetEl;
+    const lockedCase10 = vm.runInContext('decisionsLocked', sandbox);
+    if (lockedCase10) throw new Error('Decisions must be unlocked even if DOM update throws');
+    const idxCase10 = vm.runInContext('currentReviewIndex', sandbox);
+    if (idxCase10 !== 1) throw new Error('currentReviewIndex should still advance to 1 despite DOM error, got ' + idxCase10);
+
+    // Case 11: deleteAndNext on last item closes modal, and starting review wraps around to unreviewed item
+    sandbox.window.REVIEW_ITEMS = [
+        { finding_id: 'f_w0', path: '/w0.php', filename: 'w0.php', status: 'FOUND', reviewed: false, raw_sha256: 'hw0' },
+        { finding_id: 'f_w1', path: '/w1.php', filename: 'w1.php', status: 'QUARANTINED', reviewed: true, raw_sha256: 'hw1' },
+        { finding_id: 'f_w2', path: '/w2.php', filename: 'w2.php', status: 'FOUND', reviewed: false, raw_sha256: 'hw2' },
+    ];
+    vm.runInContext('currentReviewIndex = 2; decisionsLocked = false; isModalActive = true;', sandbox);
+    vm.runInContext('deleteAndNext()', sandbox);
+    fetchResolve({ json: () => Promise.resolve({ success: true, message: 'Quarantined w2' }) });
+    await new Promise(r => setTimeout(r, 40));
+    const modalActiveCase11 = vm.runInContext('isModalActive', sandbox);
+    if (modalActiveCase11) throw new Error('Modal should close after last sequential item is reviewed');
+    vm.runInContext('startReviewMode(undefined, false);', sandbox);
+    const idxCase11 = vm.runInContext('currentReviewIndex', sandbox);
+    if (idxCase11 !== 0) throw new Error('startReviewMode must wrap around to unreviewed item at index 0, got ' + idxCase11);
+
+    // Case 12: Calling deleteAndNext on a terminal finding (e.g. CHANGED_SINCE_SCAN or MISSING) directly advances without network call
+    sandbox.window.REVIEW_ITEMS = [
+        { finding_id: 'f_t0', path: '/t0.php', filename: 't0.php', status: 'CHANGED_SINCE_SCAN', reviewed: true, raw_sha256: 'ht0' },
+        { finding_id: 'f_t1', path: '/t1.php', filename: 't1.php', status: 'FOUND', reviewed: false, raw_sha256: 'ht1' },
+    ];
+    vm.runInContext('currentReviewIndex = 0; decisionsLocked = false; isModalActive = true;', sandbox);
+    lastFetchOpts = null;
+    vm.runInContext('deleteAndNext()', sandbox);
+    const idxCase12 = vm.runInContext('currentReviewIndex', sandbox);
+    if (idxCase12 !== 1) throw new Error('deleteAndNext on CHANGED_SINCE_SCAN item must advance to index 1, got ' + idxCase12);
+    if (lastFetchOpts && lastFetchOpts.method === 'POST') throw new Error('No POST network call should be made for terminal item');
+
+    // Case 13: Rapid hammering of deleteAndNext while in flight does not send duplicate requests
+    sandbox.window.REVIEW_ITEMS = [
+        { finding_id: 'f_h0', path: '/h0.php', filename: 'h0.php', status: 'FOUND', reviewed: false, raw_sha256: 'hh0' },
+        { finding_id: 'f_h1', path: '/h1.php', filename: 'h1.php', status: 'FOUND', reviewed: false, raw_sha256: 'hh1' },
+    ];
+    vm.runInContext('currentReviewIndex = 0; decisionsLocked = false; isModalActive = true;', sandbox);
+    fetchCalls = 0;
+    vm.runInContext('deleteAndNext()', sandbox);
+    const callsBefore = fetchCalls;
+    vm.runInContext('deleteAndNext()', sandbox);
+    vm.runInContext('deleteAndNext()', sandbox);
+    if (fetchCalls !== callsBefore) throw new Error('Repeated deleteAndNext calls while in flight must not trigger additional fetch calls');
+    fetchResolve({ json: () => Promise.resolve({ success: true, message: 'Quarantined h0' }) });
+    await new Promise(r => setTimeout(r, 40));
+    const idxCase13 = vm.runInContext('currentReviewIndex', sandbox);
+    if (idxCase13 !== 1) throw new Error('currentReviewIndex should be 1 after in-flight delete finishes, got ' + idxCase13);
+
+    // Case 14: Server error with MISSING code updates status to MISSING, alerts, and advances
+    sandbox.window.REVIEW_ITEMS = [
+        { finding_id: 'f_m1', path: '/m1.php', filename: 'm1.php', status: 'FOUND', reviewed: false, raw_sha256: 'hm1' },
+        { finding_id: 'f_m2', path: '/m2.php', filename: 'm2.php', status: 'FOUND', reviewed: false, raw_sha256: 'hm2' },
+    ];
+    vm.runInContext('currentReviewIndex = 0; decisionsLocked = false; isModalActive = true;', sandbox);
+    lastAlert = null;
+    vm.runInContext('deleteAndNext()', sandbox);
+    fetchResolve({ json: () => Promise.resolve({ success: false, message: 'File is missing.', code: 'MISSING' }) });
+    await new Promise(r => setTimeout(r, 40));
+    const lockedCase14 = vm.runInContext('decisionsLocked', sandbox);
+    if (lockedCase14) throw new Error('Decisions must be unlocked after MISSING error');
+    if (sandbox.window.REVIEW_ITEMS[0].status !== 'MISSING') throw new Error('Status should be updated to MISSING');
+    if (sandbox.window.REVIEW_ITEMS[0].reviewed !== true) throw new Error('File should be marked reviewed on MISSING');
+    const idxCase14 = vm.runInContext('currentReviewIndex', sandbox);
+    if (idxCase14 !== 1) throw new Error('Should advance to next file (index 1) on MISSING error, got ' + idxCase14);
 
     console.log('NODE_OK');
 }

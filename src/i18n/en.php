@@ -196,6 +196,9 @@ return array(
     'scan_live_paused' => 'Scanning paused.',
     'scan_btn_pause' => 'Pause Scan',
     'scan_btn_resume' => 'Resume Scan',
-    'err_scan_failed' => 'Scan encountered an error and stopped.'
+    'err_scan_failed' => 'Scan encountered an error and stopped.',
+    'err_request_timeout' => 'Request timed out. Please check your connection and try again.',
+    'err_server' => 'Server error',
+    'auth_required' => 'Authentication required.'
 );
 

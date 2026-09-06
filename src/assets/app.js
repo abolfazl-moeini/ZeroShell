@@ -4,8 +4,20 @@ let isModalActive = false;
 let autoReviewActive = false;
 let autoReviewPaused = false;
 let previewAbort = null;
+let previewTimer = null;
 let decisionsLocked = false;
 let lastFocused = null;
+
+function abortPreviewFetch() {
+    if (previewTimer && typeof clearTimeout !== 'undefined') {
+        clearTimeout(previewTimer);
+        previewTimer = null;
+    }
+    if (previewAbort) {
+        try { previewAbort.abort(); } catch (e) {}
+        previewAbort = null;
+    }
+}
 
 function t(key, vars) {
     vars = vars || {};
@@ -125,7 +137,8 @@ function getCsrfToken() {
     return (window.ZS_BOOT && window.ZS_BOOT.csrf) || window.ZS_CSRF || '';
 }
 
-function postForm(fields) {
+function postForm(fields, timeoutMs) {
+    const timeout = typeof timeoutMs === 'number' ? timeoutMs : 15000;
     const formData = new FormData();
     for (const k in fields) {
         if (Object.prototype.hasOwnProperty.call(fields, k) && fields[k] !== undefined && fields[k] !== null) {
@@ -133,15 +146,35 @@ function postForm(fields) {
         }
     }
     formData.append('csrf_token', getCsrfToken());
+
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    let timerId = null;
+    if (controller && timeout > 0 && typeof setTimeout !== 'undefined') {
+        timerId = setTimeout(function () {
+            try { controller.abort(); } catch (e) {}
+        }, timeout);
+    }
+
     return fetch(window.location.pathname, {
         method: 'POST',
         headers: { 'X-CSRF-Token': getCsrfToken(), 'Accept': 'application/json' },
         body: formData,
         credentials: 'same-origin',
+        signal: controller ? controller.signal : undefined,
     }).then(function (res) {
+        if (timerId && typeof clearTimeout !== 'undefined') clearTimeout(timerId);
         return res.json().catch(function () {
-            return { success: false, message: 'Authentication required.', code: 'AUTH' };
+            if (res.status === 401 || res.status === 403) {
+                return { success: false, message: (typeof t === 'function' ? t('auth_required') : 'Authentication required.'), code: 'AUTH' };
+            }
+            return { success: false, message: (typeof t === 'function' ? t('err_server') : 'Server error') + ' (' + res.status + ')', code: 'SERVER_ERROR' };
         });
+    }).catch(function (err) {
+        if (timerId && typeof clearTimeout !== 'undefined') clearTimeout(timerId);
+        if (err && err.name === 'AbortError') {
+            throw new Error(typeof t === 'function' ? t('err_request_timeout') : 'Request timed out. Please check your connection and try again.');
+        }
+        throw err;
     });
 }
 
@@ -251,17 +284,19 @@ function markItemReviewedInStorage(findingId) {
     } catch (e) {}
 }
 
+function isTerminalStatus(status) {
+    return status === 'QUARANTINED' || status === 'AI_QUARANTINED' ||
+        status === 'CHANGED_SINCE_SCAN' || status === 'MISSING' ||
+        status === 'FAILED_DELETE' || status === 'RESTORED' ||
+        status === 'TRUSTED_HIDDEN' || status === 'TRUSTED';
+}
+
 function isFindingReviewed(item, savedReviewedIds) {
     if (!item) return false;
     if (item.reviewed) return true;
     if (item.finding_id && savedReviewedIds && savedReviewedIds[item.finding_id]) return true;
     const status = item.status || 'FOUND';
-    if (status === 'QUARANTINED' || status === 'AI_QUARANTINED' || status === 'RESTORED' ||
-        status === 'CHANGED_SINCE_SCAN' || status === 'FAILED_DELETE' ||
-        status === 'TRUSTED_HIDDEN' || status === 'TRUSTED') {
-        return true;
-    }
-    return false;
+    return isTerminalStatus(status);
 }
 
 function calculateInitialReviewIndex() {
@@ -335,7 +370,7 @@ function updateActiveTableRow() {
 function setDecisionLocked(locked) {
     decisionsLocked = locked;
     const file = currentFile();
-    const isQuarantined = file && (file.status === 'QUARANTINED' || file.status === 'AI_QUARANTINED');
+    const isTerminal = !!(file && isTerminalStatus(file.status));
     ['modalDeleteBtn', 'btnMarkClean', 'modalAskAiBtn', 'btnNextBottom', 'btnPrevTop', 'btnNextTop'].forEach(function (id) {
         const el = document.getElementById(id);
         if (!el) return;
@@ -345,7 +380,7 @@ function setDecisionLocked(locked) {
             if (id === 'btnPrevTop') {
                 el.disabled = currentReviewIndex === 0;
             } else if (id === 'modalDeleteBtn' || id === 'btnMarkClean' || id === 'modalAskAiBtn') {
-                el.disabled = !!isQuarantined;
+                el.disabled = isTerminal;
             } else {
                 el.disabled = false;
             }
@@ -445,10 +480,12 @@ function loadCurrentFile() {
     const pathEl = document.getElementById('modalFilePath');
     if (pathEl) {
         pathEl.textContent = file.path || '';
-        pathEl.setAttribute('data-full-path', file.path || '');
+        if (pathEl.setAttribute) {
+            pathEl.setAttribute('data-full-path', file.path || '');
+            pathEl.setAttribute('aria-label', (file.path ? file.path + ' - ' : '') + t('copy_path_hint'));
+        }
         pathEl.title = t('copy_path_hint');
-        pathEl.setAttribute('aria-label', (file.path ? file.path + ' - ' : '') + t('copy_path_hint'));
-        pathEl.classList.remove('copied');
+        if (pathEl.classList && pathEl.classList.remove) pathEl.classList.remove('copied');
     }
     const btnCopyFloating = document.getElementById('btnCopyFloating');
     if (btnCopyFloating) btnCopyFloating.classList.remove('copied');
@@ -490,20 +527,37 @@ function loadCurrentFile() {
 
     const btnPrevTop = document.getElementById('btnPrevTop');
     if (btnPrevTop) btnPrevTop.disabled = currentReviewIndex === 0;
+    const btnNextTop = document.getElementById('btnNextTop');
+    if (btnNextTop) btnNextTop.disabled = (currentReviewIndex >= items.length - 1);
+    const isTerminal = !!(file && isTerminalStatus(file.status));
+    const delBtn = document.getElementById('modalDeleteBtn');
+    if (delBtn) delBtn.disabled = isTerminal;
+    const markBtn = document.getElementById('btnMarkClean');
+    if (markBtn) markBtn.disabled = isTerminal;
+    const askBtn = document.getElementById('modalAskAiBtn');
+    if (askBtn) askBtn.disabled = isTerminal;
+
     const codeEl = document.getElementById('modalFileContent');
     if (codeEl) codeEl.textContent = t('modal_loading');
-    const modalBody = document.querySelector('#fileViewerModal .modal-body');
+    const modalBody = (document.querySelector) ? document.querySelector('#fileViewerModal .modal-body') : null;
     if (modalBody) modalBody.scrollTop = 0;
-    setDecisionLocked(true);
 
-    if (previewAbort) previewAbort.abort();
+    abortPreviewFetch();
     previewAbort = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    if (previewAbort && typeof setTimeout !== 'undefined') {
+        previewTimer = setTimeout(function () {
+            abortPreviewFetch();
+        }, 15000);
+    }
     const q = '?do_action=view_file&finding_id=' + encodeURIComponent(file.finding_id)
         + '&scan_session_id=' + encodeURIComponent(file.scan_session_id || window.ZS_SESSION_ID)
         + '&expected_raw=' + encodeURIComponent(file.raw_sha256 || '');
     const loadId = file.finding_id;
     fetch(q, { credentials: 'same-origin', signal: previewAbort ? previewAbort.signal : undefined, headers: { 'Accept': 'application/json' } })
-        .then(function (res) { return res.json(); })
+        .then(function (res) {
+            abortPreviewFetch();
+            return res.json();
+        })
         .then(function (data) {
             if ((window.REVIEW_ITEMS[currentReviewIndex] || {}).finding_id !== loadId) return;
             if (data.success) {
@@ -517,17 +571,22 @@ function loadCurrentFile() {
                         statusEl.textContent = file.status;
                         statusEl.className = 'badge-status deleted';
                     }
+                    const bDel = document.getElementById('modalDeleteBtn');
+                    if (bDel) bDel.disabled = true;
+                    const bClean = document.getElementById('btnMarkClean');
+                    if (bClean) bClean.disabled = true;
+                    const bAi = document.getElementById('modalAskAiBtn');
+                    if (bAi) bAi.disabled = true;
                 }
             } else {
                 if (codeEl) codeEl.textContent = data.message || t('modal_err_read');
             }
-            setDecisionLocked(false);
         })
         .catch(function (e) {
+            abortPreviewFetch();
             if (e && e.name === 'AbortError') return;
             if ((window.REVIEW_ITEMS[currentReviewIndex] || {}).finding_id !== loadId) return;
             if (codeEl) codeEl.textContent = t('modal_err_network');
-            setDecisionLocked(false);
         });
 }
 
@@ -538,24 +597,37 @@ function nextReviewFile() {
         closeViewModal();
         return;
     }
-    if (currentReviewIndex < items.length - 1) {
-        currentReviewIndex++;
-        reviewCursor = Math.max(reviewCursor, currentReviewIndex);
-        if (window.ZS_BOOT) {
-            window.ZS_BOOT.review_cursor = reviewCursor;
+
+    const saved = loadSavedReviewState();
+    const savedIds = (saved && saved.reviewed_ids && typeof saved.reviewed_ids === 'object') ? saved.reviewed_ids : {};
+
+    let nextIdx = -1;
+    for (let i = currentReviewIndex + 1; i < items.length; i++) {
+        if (!isFindingReviewed(items[i], savedIds)) {
+            nextIdx = i;
+            break;
         }
-        saveReviewState({
-            index: currentReviewIndex,
-            sequential_index: currentReviewIndex,
-            review_cursor: reviewCursor,
-            is_single_inspect: false
-        });
-        syncReviewCursor(reviewCursor);
-        loadCurrentFile();
-    } else {
+    }
+
+    if (nextIdx === -1) {
         showToast(t('all_items_reviewed'));
         closeViewModal();
+        return;
     }
+
+    currentReviewIndex = nextIdx;
+    reviewCursor = Math.max(reviewCursor, currentReviewIndex);
+    if (window.ZS_BOOT) {
+        window.ZS_BOOT.review_cursor = reviewCursor;
+    }
+    saveReviewState({
+        index: currentReviewIndex,
+        sequential_index: currentReviewIndex,
+        review_cursor: reviewCursor,
+        is_single_inspect: false
+    });
+    syncReviewCursor(reviewCursor);
+    loadCurrentFile();
 }
 
 function prevReviewFile() {
@@ -594,9 +666,11 @@ function closeViewModal() {
         });
     }
     updateActiveTableRow();
-    if (previewAbort) previewAbort.abort();
+    abortPreviewFetch();
     setDecisionLocked(false);
-    if (lastFocused && lastFocused.focus) lastFocused.focus();
+    try {
+        if (lastFocused && lastFocused.focus) lastFocused.focus();
+    } catch (e) {}
 }
 
 function skipAndNext() {
@@ -638,43 +712,109 @@ function currentFile() {
 function deleteAndNext() {
     if (decisionsLocked) return;
     const file = currentFile();
-    if (!file) return;
-    if (file.status === 'QUARANTINED' || file.status === 'AI_QUARANTINED') return;
+    if (!file) {
+        closeViewModal();
+        return;
+    }
+    if (isTerminalStatus(file.status)) {
+        nextReviewFile();
+        return;
+    }
     setDecisionLocked(true);
+    abortPreviewFetch();
     const fields = findingFields(file);
     fields.do_action = 'delete_single';
-    postForm(fields).then(function (data) {
+    let promise;
+    try {
+        promise = postForm(fields);
+    } catch (e) {
+        setDecisionLocked(false);
+        try { alert((e && e.message) || t('err_delete_failed')); } catch (_) {}
+        return;
+    }
+    promise.then(function (data) {
         if (data && data.success) {
-            file.status = 'QUARANTINED';
-            file.reviewed = true;
-            markItemReviewedInStorage(file.finding_id);
-            if (data && typeof data.review_cursor === 'number') {
-                if (window.ZS_BOOT) window.ZS_BOOT.review_cursor = data.review_cursor;
-                reviewCursor = Math.max(reviewCursor, data.review_cursor);
-                saveReviewState({ review_cursor: reviewCursor, sequential_index: reviewCursor, is_single_inspect: false });
-            }
-            const statusEl = document.getElementById('modalFileStatus');
-            if (statusEl) {
-                statusEl.textContent = file.status;
-                statusEl.className = 'badge-status deleted';
-            }
-            if (file.row_id) {
-                const row = document.getElementById(file.row_id);
-                if (row) {
-                    const delBtn = row.querySelector('.btn-del-single');
-                    if (delBtn) delBtn.disabled = true;
+            try {
+                file.status = 'QUARANTINED';
+                file.reviewed = true;
+                markItemReviewedInStorage(file.finding_id);
+                if (data && typeof data.review_cursor === 'number') {
+                    if (window.ZS_BOOT) window.ZS_BOOT.review_cursor = data.review_cursor;
+                    reviewCursor = Math.max(reviewCursor, data.review_cursor);
+                    saveReviewState({ review_cursor: reviewCursor, sequential_index: reviewCursor, is_single_inspect: false });
                 }
+                const statusEl = document.getElementById('modalFileStatus');
+                if (statusEl) {
+                    statusEl.textContent = file.status;
+                    statusEl.className = 'badge-status deleted';
+                }
+                if (file.row_id) {
+                    const row = document.getElementById(file.row_id);
+                    if (row) {
+                        const delBtn = row.querySelector('.btn-del-single');
+                        if (delBtn) delBtn.disabled = true;
+                        const badge = row.querySelector('.badge-status');
+                        if (badge) {
+                            badge.textContent = file.status;
+                            badge.className = 'badge-status deleted';
+                        }
+                    }
+                }
+                const statQuar = document.getElementById('statQuarantined');
+                if (statQuar && !data.already_quarantined) {
+                    const cur = parseInt(statQuar.textContent.replace(/,/g, ''), 10) || 0;
+                    statQuar.textContent = String(cur + 1);
+                }
+                showToast(data.message || t('toast_quarantined'));
+            } catch (domErr) {
+                console.error(domErr);
             }
-            showToast(data.message || t('toast_quarantined'));
             setDecisionLocked(false);
             nextReviewFile();
         } else {
+            try {
+                if (data && (data.code === 'CHANGED_SINCE_SCAN' || data.code === 'MISSING')) {
+                    file.status = data.code;
+                    file.reviewed = true;
+                    markItemReviewedInStorage(file.finding_id);
+                    const statusEl = document.getElementById('modalFileStatus');
+                    if (statusEl) {
+                        statusEl.textContent = file.status;
+                        statusEl.className = 'badge-status deleted';
+                    }
+                    if (file.row_id) {
+                        const row = document.getElementById(file.row_id);
+                        if (row) {
+                            const delBtn = row.querySelector('.btn-del-single');
+                            if (delBtn) delBtn.disabled = true;
+                            const badge = row.querySelector('.badge-status');
+                            if (badge) {
+                                badge.textContent = file.status;
+                                badge.className = 'badge-status deleted';
+                            }
+                        }
+                    }
+                    const mDel = document.getElementById('modalDeleteBtn');
+                    if (mDel) mDel.disabled = true;
+                    const mClean = document.getElementById('btnMarkClean');
+                    if (mClean) mClean.disabled = true;
+                    const mAi = document.getElementById('modalAskAiBtn');
+                    if (mAi) mAi.disabled = true;
+
+                    setDecisionLocked(false);
+                    try { alert((data && data.message) || t('err_delete_failed')); } catch (_) {}
+                    nextReviewFile();
+                    return;
+                }
+            } catch (statusErr) {
+                console.error(statusErr);
+            }
             setDecisionLocked(false);
-            alert((data && data.message) || t('err_delete_failed'));
+            try { alert((data && data.message) || t('err_delete_failed')); } catch (_) {}
         }
     }).catch(function (err) {
         setDecisionLocked(false);
-        alert((err && err.message) || t('err_delete_failed'));
+        try { alert((err && err.message) || t('err_delete_failed')); } catch (_) {}
     });
 }
 
@@ -682,14 +822,26 @@ function markCleanCurrent() {
     if (decisionsLocked) return;
     const file = currentFile();
     if (!file) return;
-    if (file.status === 'QUARANTINED' || file.status === 'AI_QUARANTINED') return;
+    if (isTerminalStatus(file.status)) {
+        nextReviewFile();
+        return;
+    }
     setDecisionLocked(true);
+    abortPreviewFetch();
     const fields = findingFields(file);
     fields.do_action = 'mark_clean';
-    postForm(fields).then(function (data) {
+    let promise;
+    try {
+        promise = postForm(fields);
+    } catch (e) {
+        setDecisionLocked(false);
+        try { alert((e && e.message) || 'Failed'); } catch (_) {}
+        return;
+    }
+    promise.then(function (data) {
         if (!data || !data.success) {
             setDecisionLocked(false);
-            alert((data && data.message) || 'Failed');
+            try { alert((data && data.message) || 'Failed'); } catch (_) {}
             return;
         }
         showToast(data.message);
@@ -738,7 +890,7 @@ function markCleanCurrent() {
         nextReviewFile();
     }).catch(function (err) {
         setDecisionLocked(false);
-        alert((err && err.message) || 'Failed');
+        try { alert((err && err.message) || 'Failed'); } catch (_) {}
     });
 }
 
@@ -839,7 +991,7 @@ window.askAiFile = askAiCurrent;
 function askAiCurrent() {
     const file = currentFile();
     if (!file) return;
-    if (file.status === 'QUARANTINED' || file.status === 'AI_QUARANTINED') return;
+    if (isTerminalStatus(file.status)) return;
     if (!window.ZS_BOOT || !window.ZS_BOOT.has_ai) {
         openGeminiKeyModal(function () {
             askAiCurrent();
