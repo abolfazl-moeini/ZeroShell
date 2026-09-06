@@ -2982,6 +2982,434 @@ NODE_SCRIPT;
     }
 });
 
+// -------------------------------------------------------------
+// PHP Syntax Highlighting: Tokenization & Fidelity
+// -------------------------------------------------------------
+run_test('PHP Syntax Highlighting: tokenization and text fidelity', function() use ($repoRoot) {
+    $jsPath = $repoRoot . '/src/assets/app.js';
+    $nodeBin = trim((string)shell_exec('command -v node'));
+    if ($nodeBin === '') {
+        $js = file_get_contents($jsPath);
+        assert_true(strpos($js, 'function highlightPhp(') !== false, 'highlightPhp function missing in app.js');
+        return;
+    }
+
+    $nodeScript = <<<'NODE_SCRIPT'
+const fs = require('fs');
+const vm = require('vm');
+const jsPath = process.argv[2];
+const code = fs.readFileSync(jsPath, 'utf8');
+
+const sandbox = {
+    window: {},
+    document: { addEventListener() {} },
+    navigator: {},
+    console
+};
+sandbox.window.window = sandbox.window;
+sandbox.window.document = sandbox.document;
+vm.createContext(sandbox);
+vm.runInContext(code, sandbox);
+
+const highlightPhp = sandbox.window.highlightPhp;
+if (typeof highlightPhp !== 'function') throw new Error('highlightPhp is not defined on window');
+
+const sample = `<?php
+// single comment
+# hash comment
+/* multi-line comment */
+$variable = "double quote string";
+$single = 'single quote string';
+$shell = \`whoami\`;
+$hex = 0x1A + 0b101 + 42.5;
+$items = array('foo', 'bar');
+enum Status { case OK; }
+function test_func(string $data): bool {
+    yield from ['a'];
+    return true;
+}
+eval(base64_decode($single));
+$bin = hex2bin("deadbeef");
+$magic = __FILE__ . __DIR__;
+?>
+<div class="outside">HTML outside PHP</div>`;
+
+const out = highlightPhp(sample);
+
+const expectedClasses = [
+    'zs-hl-tag',
+    'zs-hl-comment',
+    'zs-hl-str',
+    'zs-hl-var',
+    'zs-hl-num',
+    'zs-hl-kw',
+    'zs-hl-danger',
+    'zs-hl-const'
+];
+for (const cls of expectedClasses) {
+    if (!out.includes(`class="${cls}"`)) {
+        throw new Error(`Missing expected syntax highlight class: ${cls}`);
+    }
+}
+
+if (!out.includes('<span class="zs-hl-kw">array</span>')) {
+    throw new Error('Expected array to be highlighted as keyword (zs-hl-kw)');
+}
+if (!out.includes('<span class="zs-hl-danger">hex2bin</span>')) {
+    throw new Error('Expected hex2bin to be highlighted as dangerous function (zs-hl-danger)');
+}
+
+const stripped = out
+    .replace(/<span class="zs-hl-[a-z]+">/g, '')
+    .replace(/<\/span>/g, '')
+    .replace(/&#039;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&gt;/g, '>')
+    .replace(/&lt;/g, '<')
+    .replace(/&amp;/g, '&');
+
+if (stripped !== sample) {
+    throw new Error('Fidelity mismatch between highlighted unescaped text and original code');
+}
+
+console.log('NODE_HL_TOKEN_OK');
+NODE_SCRIPT;
+
+    $tmp = tempnam(sys_get_temp_dir(), 'zs_node_hl_') . '.js';
+    file_put_contents($tmp, $nodeScript);
+    exec(escapeshellcmd($nodeBin) . ' ' . escapeshellarg($tmp) . ' ' . escapeshellarg($jsPath), $out, $status);
+    @unlink($tmp);
+
+    assert_equals(0, $status, 'Node highlight token test failed: ' . implode("\n", $out));
+    assert_true(in_array('NODE_HL_TOKEN_OK', $out, true), 'Highlight token test must output NODE_HL_TOKEN_OK');
+});
+
+// -------------------------------------------------------------
+// PHP Syntax Highlighting: Strict XSS Prevention
+// -------------------------------------------------------------
+run_test('PHP Syntax Highlighting: strict XSS prevention on untrusted payloads', function() use ($repoRoot) {
+    $jsPath = $repoRoot . '/src/assets/app.js';
+    $nodeBin = trim((string)shell_exec('command -v node'));
+    if ($nodeBin === '') {
+        return;
+    }
+
+    $nodeScript = <<<'NODE_SCRIPT'
+const fs = require('fs');
+const vm = require('vm');
+const jsPath = process.argv[2];
+const code = fs.readFileSync(jsPath, 'utf8');
+
+const sandbox = {
+    window: {},
+    document: { addEventListener() {} },
+    navigator: {},
+    console
+};
+sandbox.window.window = sandbox.window;
+sandbox.window.document = sandbox.document;
+vm.createContext(sandbox);
+vm.runInContext(code, sandbox);
+
+const highlightPhp = sandbox.window.highlightPhp;
+
+const maliciousPayloads = [
+    '<script>alert("xss")</script>',
+    '<img src=x onerror=alert(1)>',
+    '"><script>alert(2)</script>',
+    '<?php echo "<svg onload=alert(3)>"; ?>',
+    '// <script>alert(4)</script>',
+    '/* <iframe src="javascript:alert(5)"> */',
+    '\'"><script>alert(6)</script>\'',
+    '`"><script>alert(7)</script>`',
+    '<a href="javascript:alert(8)">click</a>',
+    '<body onload="alert(9)">',
+    '<input type="text" autofocus onfocus="alert(10)">',
+    '<?php $v = "</script><script>alert(11)</script>"; ?>',
+    '<?php eval("<script>alert(12)</script>"); ?>'
+];
+
+for (const payload of maliciousPayloads) {
+    const out = highlightPhp(payload);
+
+    const tags = out.match(/<[^>]+>/g) || [];
+    for (const tag of tags) {
+        const isAllowedSpan = /^<span class="zs-hl-(?:tag|comment|str|var|num|kw|danger|const)">$/.test(tag);
+        const isClosingSpan = (tag === '</span>');
+        if (!isAllowedSpan && !isClosingSpan) {
+            throw new Error(`XSS vulnerability! Disallowed tag '${tag}' produced for payload: ${payload}`);
+        }
+    }
+
+    if (/<(script|img|svg|iframe|body|input|a)\b/i.test(out)) {
+        throw new Error(`XSS vulnerability! Unescaped HTML element in output for payload: ${payload}`);
+    }
+}
+
+console.log('NODE_HL_XSS_OK');
+NODE_SCRIPT;
+
+    $tmp = tempnam(sys_get_temp_dir(), 'zs_node_xss_') . '.js';
+    file_put_contents($tmp, $nodeScript);
+    exec(escapeshellcmd($nodeBin) . ' ' . escapeshellarg($tmp) . ' ' . escapeshellarg($jsPath), $out, $status);
+    @unlink($tmp);
+
+    assert_equals(0, $status, 'Node highlight XSS test failed: ' . implode("\n", $out));
+    assert_true(in_array('NODE_HL_XSS_OK', $out, true), 'Highlight XSS test must output NODE_HL_XSS_OK');
+});
+
+// -------------------------------------------------------------
+// Click-to-Copy for Path & Modal Copy
+// -------------------------------------------------------------
+run_test('Click-to-Copy: UI markup, click handler, and clipboard integration', function() use ($repoRoot) {
+    $tempDir = sys_get_temp_dir() . '/zs_test_ui_copy_' . bin2hex(random_bytes(6));
+    @mkdir($tempDir, 0755, true);
+    $store = new ZS_Store($tempDir);
+    $session = array(
+        'scan_session_id'  => 'sess_test_copy',
+        'is_scanning'      => false,
+        'infected_files'   => array(),
+    );
+    $store->saveSession($session);
+    $config = array('key_hash' => 'dummy', 'csrf_secret' => 'dummy');
+
+    ob_start();
+    ZS_Ui::renderReport($session, $tempDir, $tempDir, $config, $store);
+    $html = ob_get_clean();
+
+    assert_true(strpos($html, 'id="modalFilePath"') !== false, 'modalFilePath ID must exist in UI markup');
+    assert_true(strpos($html, 'tag tag-clickable') !== false, 'modalFilePath must have tag tag-clickable class');
+    assert_true(strpos($html, 'role="button"') !== false, 'modalFilePath must have role="button"');
+    assert_true(strpos($html, 'tabindex="0"') !== false, 'modalFilePath must have tabindex="0"');
+    assert_true(strpos($html, 'title="') !== false, 'modalFilePath must have title attribute for tooltip');
+
+    @unlink($store->getSessionFile());
+    @unlink($store->getKnowledgeFile());
+    @rmdir($tempDir);
+
+    $jsPath = $repoRoot . '/src/assets/app.js';
+    $nodeBin = trim((string)shell_exec('command -v node'));
+    if ($nodeBin === '') {
+        return;
+    }
+
+    $nodeScript = <<<'NODE_SCRIPT'
+const fs = require('fs');
+const vm = require('vm');
+const jsPath = process.argv[2];
+const code = fs.readFileSync(jsPath, 'utf8');
+
+const domElements = {};
+function createMockEl(id, tag = 'div') {
+    const el = {
+        id,
+        tagName: tag.toUpperCase(),
+        textContent: '',
+        innerHTML: '',
+        title: '',
+        style: {},
+        classList: {
+            classes: new Set(),
+            add(c) { this.classes.add(c); },
+            remove(c) { this.classes.delete(c); },
+            contains(c) { return this.classes.has(c); }
+        },
+        attrs: {},
+        setAttribute(k, v) { this.attrs[k] = String(v); },
+        getAttribute(k) { return this.attrs[k] !== undefined ? this.attrs[k] : null; },
+        listeners: {},
+        addEventListener(event, fn) {
+            if (!this.listeners[event]) this.listeners[event] = [];
+            this.listeners[event].push(fn);
+        },
+        dispatchEvent(event) {
+            const handlers = this.listeners[event.type] || [];
+            handlers.forEach(h => h(event));
+        },
+        select() {},
+        parentNode: null
+    };
+    domElements[id] = el;
+    return el;
+}
+
+const mockDoc = {
+    getElementById(id) {
+        if (!domElements[id]) return createMockEl(id);
+        return domElements[id];
+    },
+    querySelector(sel) {
+        return createMockEl('mockSel');
+    },
+    querySelectorAll(sel) {
+        return [];
+    },
+    createElement(tag) {
+        return createMockEl('created_' + Math.random(), tag);
+    },
+    body: {
+        appendChild() {},
+        removeChild() {}
+    },
+    listeners: {},
+    addEventListener(event, fn) {
+        if (!this.listeners[event]) this.listeners[event] = [];
+        this.listeners[event].push(fn);
+    },
+    trigger(event) {
+        (this.listeners[event] || []).forEach(fn => fn());
+    }
+};
+
+let lastCopiedText = null;
+
+const sandbox = {
+    window: {
+        ZS_BOOT: { csrf: 'tok' },
+        ZS_I18N: {
+            modal_copied: 'Copied!',
+            path_copied: 'Path copied to clipboard',
+            copy_path_hint: 'Click to copy path',
+            modal_loading: 'Fetching file content from server...'
+        },
+        isSecureContext: true
+    },
+    document: mockDoc,
+    navigator: {
+        clipboard: {
+            writeText(txt) {
+                lastCopiedText = txt;
+                return Promise.resolve();
+            }
+        }
+    },
+    setTimeout: global.setTimeout,
+    clearTimeout: global.clearTimeout,
+    console
+};
+sandbox.window.window = sandbox.window;
+sandbox.window.document = sandbox.document;
+sandbox.window.navigator = sandbox.navigator;
+
+vm.createContext(sandbox);
+vm.runInContext(code, sandbox);
+mockDoc.trigger('DOMContentLoaded');
+
+async function runTests() {
+    // Case 1: copyFilePath with data-full-path
+    const pathEl = mockDoc.getElementById('modalFilePath');
+    pathEl.setAttribute('data-full-path', '/var/www/site/wp-content/themes/evil.php');
+    pathEl.textContent = '/var/www/site/wp-content/themes/evil.php';
+
+    sandbox.window.copyFilePath();
+    await new Promise(r => setTimeout(r, 20));
+    if (lastCopiedText !== '/var/www/site/wp-content/themes/evil.php') {
+        throw new Error('copyFilePath did not copy the expected path');
+    }
+    if (!pathEl.classList.contains('copied')) {
+        throw new Error('pathEl did not receive copied class for visual feedback');
+    }
+
+    // Case 2: copyModalContent copies raw textContent (ignoring inner HTML spans)
+    const codeEl = mockDoc.getElementById('modalFileContent');
+    codeEl.textContent = '<?php echo "clean unhighlighted raw text"; ?>';
+    const highlightPhp = sandbox.window.highlightPhp;
+    codeEl.innerHTML = highlightPhp(codeEl.textContent);
+
+    sandbox.window.copyModalContent();
+    await new Promise(r => setTimeout(r, 20));
+    if (lastCopiedText !== '<?php echo "clean unhighlighted raw text"; ?>') {
+        throw new Error('copyModalContent did not copy raw unhighlighted text: got ' + lastCopiedText);
+    }
+
+    // Case 3: Fallback copy when navigator.clipboard is unavailable
+    sandbox.navigator.clipboard = null;
+    lastCopiedText = null;
+    let execCommandCalled = false;
+    mockDoc.execCommand = function(cmd) {
+        if (cmd === 'copy') execCommandCalled = true;
+    };
+
+    sandbox.window.copyTextToClipboard('/fallback/path.php', 'Copied');
+    await new Promise(r => setTimeout(r, 20));
+    if (!execCommandCalled) {
+        throw new Error('Fallback document.execCommand copy was not called when clipboard API unavailable');
+    }
+
+    // Case 4: Keyboard activation with Space and Enter on #modalFilePath
+    lastCopiedText = null;
+    sandbox.navigator.clipboard = {
+        writeText(txt) {
+            lastCopiedText = txt;
+            return Promise.resolve();
+        }
+    };
+    pathEl.setAttribute('data-full-path', '/var/www/site/index.php');
+    pathEl.textContent = '/var/www/site/index.php';
+    let spaceDefaultPrevented = false;
+    let spacePropagationStopped = false;
+    const spaceEvt = {
+        type: 'keydown',
+        key: ' ',
+        code: 'Space',
+        preventDefault() { spaceDefaultPrevented = true; },
+        stopPropagation() { spacePropagationStopped = true; }
+    };
+    pathEl.dispatchEvent(spaceEvt);
+    await new Promise(r => setTimeout(r, 20));
+    if (lastCopiedText !== '/var/www/site/index.php') {
+        throw new Error('Space keydown on pathEl did not copy path');
+    }
+    if (!spaceDefaultPrevented || !spacePropagationStopped) {
+        throw new Error('Space keydown on pathEl must call preventDefault and stopPropagation to prevent skipping');
+    }
+
+    // Case 5: copyModalContent ignores loading placeholder
+    lastCopiedText = null;
+    codeEl.textContent = 'Fetching file content from server...';
+    sandbox.window.copyModalContent();
+    await new Promise(r => setTimeout(r, 20));
+    if (lastCopiedText !== null) {
+        throw new Error('copyModalContent must not copy modal_loading placeholder text');
+    }
+
+    console.log('NODE_COPY_OK');
+}
+
+runTests().catch(err => {
+    console.error(err);
+    process.exit(1);
+});
+NODE_SCRIPT;
+
+    $tmp = tempnam(sys_get_temp_dir(), 'zs_node_copy_') . '.js';
+    file_put_contents($tmp, $nodeScript);
+    exec(escapeshellcmd($nodeBin) . ' ' . escapeshellarg($tmp) . ' ' . escapeshellarg($jsPath), $out, $status);
+    @unlink($tmp);
+
+    assert_equals(0, $status, 'Node click-to-copy test failed: ' . implode("\n", $out));
+    assert_true(in_array('NODE_COPY_OK', $out, true), 'Click-to-copy test must output NODE_COPY_OK');
+});
+
+// -------------------------------------------------------------
+// Localization: Path Copy & Syntax Keys
+// -------------------------------------------------------------
+run_test('Localization: path_copied and copy_path_hint in en.php and fa.php', function() use ($repoRoot) {
+    $en = include $repoRoot . '/src/i18n/en.php';
+    $fa = include $repoRoot . '/src/i18n/fa.php';
+
+    assert_true(isset($en['path_copied']), 'en.php missing path_copied');
+    assert_true(isset($fa['path_copied']), 'fa.php missing path_copied');
+    assert_true(strlen($en['path_copied']) > 0, 'en path_copied must not be empty');
+    assert_true(strlen($fa['path_copied']) > 0, 'fa path_copied must not be empty');
+
+    assert_true(isset($en['copy_path_hint']), 'en.php missing copy_path_hint');
+    assert_true(isset($fa['copy_path_hint']), 'fa.php missing copy_path_hint');
+    assert_true(strlen($en['copy_path_hint']) > 0, 'en copy_path_hint must not be empty');
+    assert_true(strlen($fa['copy_path_hint']) > 0, 'fa copy_path_hint must not be empty');
+
+    assert_true($en['path_copied'] !== $fa['path_copied'], 'en and fa translations should be distinct');
+});
 
 if ($prevEnvKey !== false) {
     putenv('GEMINI_API_KEY=' . $prevEnvKey);

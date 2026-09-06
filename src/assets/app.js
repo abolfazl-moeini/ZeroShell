@@ -23,6 +23,103 @@ function showToast(msg) {
     setTimeout(function () { toast.style.display = 'none'; }, 3000);
 }
 
+function escapeHtml(str) {
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
+const PHP_KEYWORDS = {
+    'abstract': 1, 'and': 1, 'array': 1, 'as': 1, 'break': 1, 'callable': 1, 'case': 1, 'catch': 1,
+    'class': 1, 'clone': 1, 'const': 1, 'continue': 1, 'declare': 1, 'default': 1,
+    'die': 1, 'do': 1, 'echo': 1, 'else': 1, 'elseif': 1, 'empty': 1, 'enddeclare': 1,
+    'endfor': 1, 'endforeach': 1, 'endif': 1, 'endswitch': 1, 'endwhile': 1, 'enum': 1, 'exit': 1,
+    'extends': 1, 'final': 1, 'finally': 1, 'fn': 1, 'for': 1, 'foreach': 1, 'from': 1,
+    'function': 1, 'global': 1, 'goto': 1, 'if': 1, 'implements': 1, 'include': 1,
+    'include_once': 1, 'instanceof': 1, 'insteadof': 1, 'interface': 1, 'isset': 1,
+    'list': 1, 'match': 1, 'namespace': 1, 'new': 1, 'or': 1, 'print': 1, 'private': 1,
+    'protected': 1, 'public': 1, 'readonly': 1, 'require': 1, 'require_once': 1,
+    'return': 1, 'static': 1, 'switch': 1, 'throw': 1, 'trait': 1, 'try': 1,
+    'unset': 1, 'use': 1, 'var': 1, 'while': 1, 'xor': 1, 'yield': 1,
+    'int': 1, 'float': 1, 'bool': 1, 'string': 1, 'void': 1, 'iterable': 1, 'object': 1, 'mixed': 1, 'never': 1
+};
+
+const PHP_DANGEROUS = {
+    'eval': 1, 'assert': 1, 'base64_decode': 1, 'base64_encode': 1,
+    'gzinflate': 1, 'gzuncompress': 1, 'gzdecode': 1, 'str_rot13': 1,
+    'create_function': 1, 'preg_replace': 1, 'preg_replace_callback': 1,
+    'shell_exec': 1, 'exec': 1, 'system': 1, 'passthru': 1, 'proc_open': 1,
+    'popen': 1, 'curl_exec': 1, 'file_get_contents': 1, 'file_put_contents': 1,
+    'readfile': 1, 'fopen': 1, 'fwrite': 1, 'unlink': 1, 'chmod': 1,
+    'move_uploaded_file': 1, 'unserialize': 1,
+    'hex2bin': 1, 'bin2hex': 1, 'rawurldecode': 1, 'urldecode': 1, 'chr': 1, 'ord': 1
+};
+
+const PHP_CONSTANTS = {
+    'true': 1, 'false': 1, 'null': 1, 'self': 1, 'parent': 1,
+    '__file__': 1, '__dir__': 1, '__line__': 1, '__function__': 1,
+    '__class__': 1, '__method__': 1, '__namespace__': 1, '__trait__': 1
+};
+
+const phpTokenRegex = /(\/\*[\s\S]*?(?:\*\/|$)|(?:\/\/|#)(?:(?!\?>)[^\r\n])*)|(\x27[^\x27\\]*(?:\\.[^\x27\\]*)*(?:\x27|$)|"[^"\\]*(?:\\.[^"\\]*)*(?:"|$)|`[^`\\]*(?:\\.[^`\\]*)*(?:`|$))|(<\?(?:php|=)?|\?>)|(\$+[a-zA-Z_\x7f-\xff][a-zA-Z0-9_\x7f-\xff]*)|(\b0x[0-9a-fA-F]+\b|\b0b[01]+\b|\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b)|([a-zA-Z_\x7f-\xff][a-zA-Z0-9_\x7f-\xff]*)/g;
+
+function highlightPhp(code) {
+    if (!code) return '';
+    phpTokenRegex.lastIndex = 0;
+    let out = '';
+    let lastIndex = 0;
+    let match;
+
+    while ((match = phpTokenRegex.exec(code)) !== null) {
+        if (match.index > lastIndex) {
+            out += escapeHtml(code.slice(lastIndex, match.index));
+        }
+        lastIndex = phpTokenRegex.lastIndex;
+
+        const full = match[0];
+        const comment = match[1];
+        const str = match[2];
+        const tag = match[3];
+        const variable = match[4];
+        const num = match[5];
+        const word = match[6];
+        const escaped = escapeHtml(full);
+
+        if (comment) {
+            out += '<span class="zs-hl-comment">' + escaped + '</span>';
+        } else if (str) {
+            out += '<span class="zs-hl-str">' + escaped + '</span>';
+        } else if (tag) {
+            out += '<span class="zs-hl-tag">' + escaped + '</span>';
+        } else if (variable) {
+            out += '<span class="zs-hl-var">' + escaped + '</span>';
+        } else if (num) {
+            out += '<span class="zs-hl-num">' + escaped + '</span>';
+        } else if (word) {
+            const lower = word.toLowerCase();
+            if (PHP_DANGEROUS[lower]) {
+                out += '<span class="zs-hl-danger">' + escaped + '</span>';
+            } else if (PHP_KEYWORDS[lower]) {
+                out += '<span class="zs-hl-kw">' + escaped + '</span>';
+            } else if (PHP_CONSTANTS[lower]) {
+                out += '<span class="zs-hl-const">' + escaped + '</span>';
+            } else {
+                out += escaped;
+            }
+        } else {
+            out += escaped;
+        }
+    }
+
+    if (lastIndex < code.length) {
+        out += escapeHtml(code.slice(lastIndex));
+    }
+    return out;
+}
+
 function getCsrfToken() {
     return (window.ZS_BOOT && window.ZS_BOOT.csrf) || window.ZS_CSRF || '';
 }
@@ -262,7 +359,15 @@ function loadCurrentFile() {
     const nameEl = document.getElementById('modalFileName');
     if (nameEl) nameEl.textContent = file.filename || '';
     const pathEl = document.getElementById('modalFilePath');
-    if (pathEl) pathEl.textContent = file.path || '';
+    if (pathEl) {
+        pathEl.textContent = file.path || '';
+        pathEl.setAttribute('data-full-path', file.path || '');
+        pathEl.title = t('copy_path_hint');
+        pathEl.setAttribute('aria-label', (file.path ? file.path + ' - ' : '') + t('copy_path_hint'));
+        pathEl.classList.remove('copied');
+    }
+    const btnCopyFloating = document.getElementById('btnCopyFloating');
+    if (btnCopyFloating) btnCopyFloating.classList.remove('copied');
     const reasonEl = document.getElementById('modalFileReason');
     if (reasonEl) reasonEl.textContent = file.reason || '';
     const hashEl = document.getElementById('modalRawHash');
@@ -303,6 +408,8 @@ function loadCurrentFile() {
     if (btnPrevTop) btnPrevTop.disabled = currentReviewIndex === 0;
     const codeEl = document.getElementById('modalFileContent');
     if (codeEl) codeEl.textContent = t('modal_loading');
+    const modalBody = document.querySelector('#fileViewerModal .modal-body');
+    if (modalBody) modalBody.scrollTop = 0;
     setDecisionLocked(true);
 
     if (previewAbort) previewAbort.abort();
@@ -316,7 +423,10 @@ function loadCurrentFile() {
         .then(function (data) {
             if ((window.REVIEW_ITEMS[currentReviewIndex] || {}).finding_id !== loadId) return;
             if (data.success) {
-                if (codeEl) codeEl.textContent = data.content + (data.is_truncated ? '\n\n' + t('modal_trunc_notice') : '');
+                if (codeEl) {
+                    const rawContent = data.content + (data.is_truncated ? '\n\n' + t('modal_trunc_notice') : '');
+                    codeEl.innerHTML = highlightPhp(rawContent);
+                }
                 if (data.is_quarantined) {
                     file.status = file.status === 'AI_QUARANTINED' ? 'AI_QUARANTINED' : 'QUARANTINED';
                     if (statusEl) {
@@ -565,30 +675,75 @@ function askAiCurrent() {
     }).catch(function () { if (btn) btn.disabled = false; });
 }
 
-function copyModalContent() {
-    const codeEl = document.getElementById('modalFileContent');
-    const text = codeEl ? codeEl.textContent : '';
+let pathCopyTimer = null;
+let codeCopyTimer = null;
+
+function copyTextToClipboard(text, successMsg, onSuccess) {
     if (!text) return;
     function fallbackCopy() {
         try {
             const ta = document.createElement('textarea');
             ta.value = text;
+            ta.setAttribute('readonly', '');
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            ta.style.left = '-9999px';
+            ta.style.fontSize = '16px';
             document.body.appendChild(ta);
-            ta.select();
-            document.execCommand('copy');
-            document.body.removeChild(ta);
-            showToast(t('modal_copied'));
+            if (ta.select) ta.select();
+            if (ta.setSelectionRange) ta.setSelectionRange(0, text.length);
+            let ok = false;
+            try {
+                ok = document.execCommand ? document.execCommand('copy') : false;
+                if (ok === undefined) ok = true;
+            } catch (err) {
+                ok = false;
+            }
+            if (ta.parentNode) ta.parentNode.removeChild(ta);
+            if (ok) {
+                if (successMsg) showToast(successMsg);
+                if (onSuccess) onSuccess();
+            }
         } catch (e) {}
     }
-    if (navigator.clipboard && window.isSecureContext) {
-        navigator.clipboard.writeText(text).then(function () {
-            showToast(t('modal_copied'));
+    const clip = (typeof window !== 'undefined' && window.navigator && window.navigator.clipboard) ? window.navigator.clipboard : (typeof navigator !== 'undefined' ? navigator.clipboard : null);
+    if (clip && (typeof window === 'undefined' || window.isSecureContext)) {
+        clip.writeText(text).then(function () {
+            if (successMsg) showToast(successMsg);
+            if (onSuccess) onSuccess();
         }).catch(function () {
             fallbackCopy();
         });
     } else {
         fallbackCopy();
     }
+}
+
+function copyModalContent() {
+    const codeEl = document.getElementById('modalFileContent');
+    const text = codeEl ? codeEl.textContent : '';
+    if (!text || text === t('modal_loading') || text === t('modal_err_read') || text === t('modal_err_network')) return;
+    const btn = document.getElementById('btnCopyFloating');
+    copyTextToClipboard(text, t('modal_copied'), function () {
+        if (btn) {
+            btn.classList.add('copied');
+            if (codeCopyTimer) clearTimeout(codeCopyTimer);
+            codeCopyTimer = setTimeout(function () { btn.classList.remove('copied'); }, 1500);
+        }
+    });
+}
+
+function copyFilePath() {
+    const pathEl = document.getElementById('modalFilePath');
+    const path = pathEl ? (pathEl.getAttribute('data-full-path') || pathEl.textContent || '').trim() : '';
+    if (!path) return;
+    copyTextToClipboard(path, t('path_copied'), function () {
+        if (pathEl) {
+            pathEl.classList.add('copied');
+            if (pathCopyTimer) clearTimeout(pathCopyTimer);
+            pathCopyTimer = setTimeout(function () { pathEl.classList.remove('copied'); }, 1500);
+        }
+    });
 }
 
 let autoTimer = null;
@@ -795,6 +950,17 @@ function bindUi() {
     if (askBtn) askBtn.addEventListener('click', askAiCurrent);
     const copyBtn = document.getElementById('btnCopyFloating');
     if (copyBtn) copyBtn.addEventListener('click', copyModalContent);
+    const pathEl = document.getElementById('modalFilePath');
+    if (pathEl) {
+        pathEl.addEventListener('click', copyFilePath);
+        pathEl.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter' || e.key === ' ' || e.code === 'Space') {
+                e.preventDefault();
+                e.stopPropagation();
+                copyFilePath();
+            }
+        });
+    }
 
     const btnSettings = document.getElementById('btnSettings');
     if (btnSettings) btnSettings.addEventListener('click', function () { document.getElementById('settingsModal').classList.add('active'); });
@@ -1039,3 +1205,10 @@ document.addEventListener('keydown', function (e) {
     else if (key === 'b') markCleanCurrent();
     else if (key === 'a') askAiCurrent();
 });
+
+if (typeof window !== 'undefined') {
+    window.highlightPhp = highlightPhp;
+    window.copyFilePath = copyFilePath;
+    window.copyModalContent = copyModalContent;
+    window.copyTextToClipboard = copyTextToClipboard;
+}

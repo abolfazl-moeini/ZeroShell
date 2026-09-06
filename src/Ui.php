@@ -344,7 +344,7 @@ class ZS_Ui {
             </div>
             <div id="strikeBanner" class="strike-banner"></div>
             <div class="modal-info-bar">
-                <div><?php echo htmlspecialchars(ZS_I18n::t('modal_path'), ENT_QUOTES, 'UTF-8'); ?> <span class="tag" id="modalFilePath"></span></div>
+                <div><?php echo htmlspecialchars(ZS_I18n::t('modal_path'), ENT_QUOTES, 'UTF-8'); ?> <span class="tag tag-clickable" id="modalFilePath" role="button" tabindex="0" title="<?php echo htmlspecialchars(ZS_I18n::t('copy_path_hint'), ENT_QUOTES, 'UTF-8'); ?>" aria-label="<?php echo htmlspecialchars(ZS_I18n::t('copy_path_hint'), ENT_QUOTES, 'UTF-8'); ?>"></span></div>
                 <div><?php echo htmlspecialchars(ZS_I18n::t('modal_reason'), ENT_QUOTES, 'UTF-8'); ?> <span id="modalFileReason" style="color:#facc15;"></span></div>
                 <div><?php echo htmlspecialchars(ZS_I18n::t('modal_raw_hash'), ENT_QUOTES, 'UTF-8'); ?> <span class="tag" id="modalRawHash"></span></div>
             </div>

@@ -37,6 +37,8 @@ return array(
     'modal_norm_hash' => 'Norm SHA256:',
     'modal_copy_code' => 'Copy Code',
     'modal_copied' => 'Copied!',
+    'path_copied' => 'Path copied to clipboard',
+    'copy_path_hint' => 'Click to copy path',
     'modal_loading' => 'Fetching file content from server...',
     'modal_trunc_notice' => '/* [Notice: File exceeds 1MB preview cap; displaying first 1MB only] */',
     'btn_prev' => 'Previous [P]',

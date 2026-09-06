@@ -210,6 +210,59 @@ tr.active-review-row { outline: 2px solid #38bdf8 !important; background: rgba(5
     color: #cbd5e1;
 }
 .modal-info-bar .tag { background: #334155; padding: 3px 8px; border-radius: 4px; font-family: monospace; direction: ltr; }
+.modal-info-bar .tag-clickable {
+    cursor: pointer;
+    user-select: text;
+    transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    position: relative;
+    border: 1px solid #475569;
+    max-width: 100%;
+    word-break: break-all;
+}
+.modal-info-bar .tag-clickable:hover {
+    background: #334155;
+    color: #38bdf8;
+    border-color: #38bdf8;
+}
+.modal-info-bar .tag-clickable:focus-visible {
+    outline: 2px solid #38bdf8;
+    outline-offset: 2px;
+}
+.modal-info-bar .tag-clickable:active {
+    transform: scale(0.98);
+}
+.modal-info-bar .tag-clickable::after {
+    content: '';
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    flex-shrink: 0;
+    opacity: 0.75;
+    background-color: currentColor;
+    -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='9' y='9' width='13' height='13' rx='2' ry='2'%3E%3C/rect%3E%3Cpath d='M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1'%3E%3C/path%3E%3C/svg%3E") no-repeat center / contain;
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='9' y='9' width='13' height='13' rx='2' ry='2'%3E%3C/rect%3E%3Cpath d='M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1'%3E%3C/path%3E%3C/svg%3E") no-repeat center / contain;
+    transition: opacity 0.15s ease;
+}
+@supports not ((mask: url("")) or (-webkit-mask: url(""))) {
+    .modal-info-bar .tag-clickable::after {
+        display: none;
+    }
+}
+.modal-info-bar .tag-clickable:hover::after {
+    opacity: 1;
+}
+.modal-info-bar .tag-clickable.copied {
+    background: #14532d !important;
+    color: #86efac !important;
+    border-color: #22c55e !important;
+}
+.modal-info-bar .tag-clickable.copied::after {
+    -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='20 6 9 17 4 12'%3E%3C/polyline%3E%3C/svg%3E");
+    mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='20 6 9 17 4 12'%3E%3C/polyline%3E%3C/svg%3E");
+}
 .strike-banner {
     background: #78350f;
     border-bottom: 1px solid #b45309;
@@ -275,6 +328,15 @@ html[dir="rtl"] .btn-copy-floating { float: left; }
     text-align: left;
     user-select: text;
 }
+/* PHP Syntax Highlighting */
+.zs-hl-tag { color: #facc15; font-weight: 600; }
+.zs-hl-kw { color: #c084fc; font-weight: 500; }
+.zs-hl-danger { color: #f87171; font-weight: 600; text-decoration: underline dotted #f87171 1px; text-underline-offset: 2px; }
+.zs-hl-var { color: #38bdf8; }
+.zs-hl-str { color: #4ade80; }
+.zs-hl-comment { color: #64748b; font-style: italic; }
+.zs-hl-num { color: #fb923c; }
+.zs-hl-const { color: #818cf8; }
 .modal-footer {
     padding: 12px 20px;
     border-top: 1px solid #334155;
