@@ -2911,6 +2911,72 @@ run_test('Review navigation: view_file reads quarantined file content from quara
     @unlink($dataDir . '/config.php');
     @unlink($store->getSessionFile());
     @unlink($store->getKnowledgeFile());
+    @rmdir($rootDir);
+    @rmdir($tempDir);
+});
+
+run_test('view_file: actionViewFile produces valid JSON for files with binary nulls, invalid UTF-8 and large content', function() {
+    $tempDir = sys_get_temp_dir() . '/zs_vf_test_' . bin2hex(random_bytes(4));
+    $rootDir = $tempDir . '/root';
+    $dataDir = $tempDir . '/data';
+    @mkdir($rootDir, 0755, true);
+    @mkdir($dataDir, 0755, true);
+
+    $keyHash = password_hash('TestPass1234', PASSWORD_DEFAULT);
+    ZS_Config::saveConfig(array(
+        'key_hash'    => $keyHash,
+        'csrf_secret' => 'csrf_test_secret_123456',
+    ), $dataDir);
+
+    // Create file with binary bytes, null bytes, noncharacters, and docblock matching user error
+    $testContent = "<?php\n/**\n * @param bool|null \$has_noncharacters Set to indicate if scanned string contained noncharacters.\n */\n";
+    $testContent .= "echo 'hello \x00 world \xFF\xFE\x80 \xEF\xBF\xBE';\n";
+    $testContent .= str_repeat("// Extra padding line for size\n", 300);
+
+    $filePath = $rootDir . '/compat-utf8.php';
+    file_put_contents($filePath, $testContent);
+    $rawHash = hash('sha256', $testContent);
+
+    $store = new ZS_Store($dataDir);
+    $store->saveSession(array(
+        'scan_session_id' => 'sid_vf_test',
+        'review_cursor'   => 0,
+        'infected_files'  => array(
+            array(
+                'finding_id'  => 'fid_compat',
+                'path'        => $filePath,
+                'status'      => 'FOUND',
+                'raw_sha256'  => $rawHash,
+                'reason'      => 'Test finding',
+                'size'        => strlen($testContent),
+            )
+        )
+    ));
+
+    $res = run_zs_test_worker_action($rootDir, $dataDir, array(
+        'do_action'       => 'view_file',
+        'scan_session_id' => 'sid_vf_test',
+        'finding_id'      => 'fid_compat',
+        'expected_raw'    => $rawHash,
+    ));
+
+    assert_true(!empty($res['success']), 'view_file action must succeed');
+    assert_equals('compat-utf8.php', $res['filename'], 'filename must match');
+    assert_true(is_string($res['content']), 'content must be returned as string');
+    assert_true(strpos($res['content'], 'has_noncharacters') !== false, 'content must contain docblock');
+    
+    // Verify JSON encoding can be parsed strictly by json_decode without error
+    $rawJson = json_encode($res, ZS_Config::jsonFlags());
+    assert_true($rawJson !== false, 'JSON encoding of view_file result must succeed');
+    assert_equals(JSON_ERROR_NONE, json_last_error(), 'json_last_error must be NONE');
+    $decoded = json_decode($rawJson, true);
+    assert_true(is_array($decoded), 'Decoded JSON must be array');
+    assert_true($decoded['success'], 'Decoded JSON must have success: true');
+
+    @unlink($filePath);
+    @unlink($dataDir . '/config.php');
+    @unlink($store->getSessionFile());
+    @unlink($store->getKnowledgeFile());
     @rmdir($dataDir);
     @rmdir($rootDir);
     @rmdir($tempDir);
@@ -3116,7 +3182,10 @@ const sandbox = {
     clearTimeout: clearTimeout,
     alert: (msg) => { lastAlert = msg; },
     FormData: class { append(k, v) { this[k] = v; } },
-    AbortController: class { abort() {} },
+    AbortController: class {
+        constructor() { this.signal = { aborted: false }; }
+        abort() { this.signal.aborted = true; }
+    },
     console: console,
 };
 sandbox.window.window = sandbox.window;
@@ -3342,6 +3411,49 @@ async function runTests() {
     if (sandbox.window.REVIEW_ITEMS[0].reviewed !== true) throw new Error('File should be marked reviewed on MISSING');
     const idxCase14 = vm.runInContext('currentReviewIndex', sandbox);
     if (idxCase14 !== 1) throw new Error('Should advance to next file (index 1) on MISSING error, got ' + idxCase14);
+
+    // Case 15: loadCurrentFile streams response text without prematurely aborting fetch signal
+    sandbox.window.REVIEW_ITEMS = [
+        { finding_id: 'f_utf8', path: '/compat-utf8.php', filename: 'compat-utf8.php', status: 'FOUND', reviewed: false, raw_sha256: 'hutf8' },
+    ];
+    vm.runInContext('currentReviewIndex = 0; decisionsLocked = false;', sandbox);
+    vm.runInContext('loadCurrentFile()', sandbox);
+    let signalWasAbortedDuringStream = false;
+    const testPayload = JSON.stringify({
+        success: true,
+        filename: 'compat-utf8.php',
+        content: '<?php echo "valid utf8 code";',
+        size: 19386,
+        size_fmt: '19,386 B'
+    });
+    fetchResolve({
+        ok: true,
+        text: () => {
+            if (lastFetchOpts && lastFetchOpts.signal && lastFetchOpts.signal.aborted) {
+                signalWasAbortedDuringStream = true;
+            }
+            return Promise.resolve(testPayload);
+        }
+    });
+    await new Promise(r => setTimeout(r, 40));
+    if (signalWasAbortedDuringStream) {
+        throw new Error('loadCurrentFile aborted its fetch signal before response stream reading completed');
+    }
+    const codeEl = sandbox.document.getElementById('modalFileContent');
+    if (!codeEl.innerHTML || codeEl.innerHTML.indexOf('valid utf8 code') === -1) {
+        throw new Error('modalFileContent was not populated with file content after streaming JSON response');
+    }
+
+    // Case 15b: loadCurrentFile handles malformed/truncated JSON text without unhandled exception
+    vm.runInContext('loadCurrentFile()', sandbox);
+    fetchResolve({
+        ok: true,
+        text: () => Promise.resolve('{"success":true,"filename":"compat-utf8.php","content":"unterminated...')
+    });
+    await new Promise(r => setTimeout(r, 40));
+    if (!codeEl.textContent || codeEl.textContent.indexOf('Invalid JSON response') === -1) {
+        throw new Error('loadCurrentFile did not display graceful error for malformed JSON response, got: ' + codeEl.textContent);
+    }
 
     console.log('NODE_OK');
 }

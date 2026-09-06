@@ -165,16 +165,56 @@ class ZS_Http {
         return (strpos($accept, 'application/json') !== false);
     }
 
+    private static function sanitizeUtf8Recursive($data) {
+        if (is_string($data)) {
+            return ZS_Config::ensureUtf8($data);
+        }
+        if (is_array($data)) {
+            $clean = array();
+            foreach ($data as $k => $v) {
+                $cleanKey = is_string($k) ? ZS_Config::ensureUtf8($k) : $k;
+                $clean[$cleanKey] = self::sanitizeUtf8Recursive($v);
+            }
+            return $clean;
+        }
+        return $data;
+    }
+
     private static function jsonFail($code, $message, $extra = array()) {
+        if (ob_get_level() > 0) {
+            @ob_clean();
+        }
         http_response_code($code);
         header('Content-Type: application/json; charset=utf-8');
-        echo json_encode(array_merge(array('success' => false, 'message' => $message), $extra), ZS_Config::jsonFlags());
+        header('X-Content-Type-Options: nosniff');
+        $payload = array_merge(array('success' => false, 'message' => $message), $extra);
+        $json = json_encode($payload, ZS_Config::jsonFlags());
+        if ($json === false) {
+            $json = json_encode(self::sanitizeUtf8Recursive($payload), ZS_Config::jsonFlags());
+            if ($json === false) {
+                $json = json_encode(array('success' => false, 'message' => 'JSON encoding failed'));
+            }
+        }
+        echo $json;
         exit;
     }
 
     private static function jsonOk($payload) {
+        if (ob_get_level() > 0) {
+            @ob_clean();
+        }
         header('Content-Type: application/json; charset=utf-8');
-        echo json_encode(array_merge(array('success' => true), $payload), ZS_Config::jsonFlags());
+        header('X-Content-Type-Options: nosniff');
+        $data = array_merge(array('success' => true), $payload);
+        $json = json_encode($data, ZS_Config::jsonFlags());
+        if ($json === false) {
+            $data = self::sanitizeUtf8Recursive($data);
+            $json = json_encode($data, ZS_Config::jsonFlags());
+            if ($json === false) {
+                $json = json_encode(array('success' => false, 'message' => 'JSON encoding failed: ' . json_last_error_msg()));
+            }
+        }
+        echo $json;
         exit;
     }
 
@@ -562,6 +602,8 @@ class ZS_Http {
                 self::jsonFail(500, 'Could not read file contents.');
             }
         }
+
+        $content = ZS_Config::ensureUtf8((string)$content);
 
         self::jsonOk(array(
             'filename'       => basename($path),

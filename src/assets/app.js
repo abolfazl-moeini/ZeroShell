@@ -8,11 +8,15 @@ let previewTimer = null;
 let decisionsLocked = false;
 let lastFocused = null;
 
-function abortPreviewFetch() {
+function clearPreviewTimer() {
     if (previewTimer && typeof clearTimeout !== 'undefined') {
         clearTimeout(previewTimer);
         previewTimer = null;
     }
+}
+
+function abortPreviewFetch() {
+    clearPreviewTimer();
     if (previewAbort) {
         try { previewAbort.abort(); } catch (e) {}
         previewAbort = null;
@@ -555,14 +559,26 @@ function loadCurrentFile() {
     const loadId = file.finding_id;
     fetch(q, { credentials: 'same-origin', signal: previewAbort ? previewAbort.signal : undefined, headers: { 'Accept': 'application/json' } })
         .then(function (res) {
-            abortPreviewFetch();
-            return res.json();
+            clearPreviewTimer();
+            if (!res.ok) {
+                throw new Error(t('modal_err_network') + ' (' + res.status + ')');
+            }
+            return res.text();
         })
-        .then(function (data) {
+        .then(function (text) {
+            previewAbort = null;
+            clearPreviewTimer();
+            let data;
+            try {
+                data = JSON.parse(text);
+            } catch (jsonErr) {
+                console.error('Failed to parse view_file response:', jsonErr, text.slice(0, 300));
+                throw new Error(t('modal_err_read') + ' (Invalid JSON response)');
+            }
             if ((window.REVIEW_ITEMS[currentReviewIndex] || {}).finding_id !== loadId) return;
             if (data.success) {
                 if (codeEl) {
-                    const rawContent = data.content + (data.is_truncated ? '\n\n' + t('modal_trunc_notice') : '');
+                    const rawContent = (typeof data.content === 'string' ? data.content : '') + (data.is_truncated ? '\n\n' + t('modal_trunc_notice') : '');
                     codeEl.innerHTML = highlightPhp(rawContent);
                 }
                 if (data.is_quarantined) {
@@ -583,10 +599,10 @@ function loadCurrentFile() {
             }
         })
         .catch(function (e) {
-            abortPreviewFetch();
+            clearPreviewTimer();
             if (e && e.name === 'AbortError') return;
             if ((window.REVIEW_ITEMS[currentReviewIndex] || {}).finding_id !== loadId) return;
-            if (codeEl) codeEl.textContent = t('modal_err_network');
+            if (codeEl) codeEl.textContent = (e && e.message) ? e.message : t('modal_err_network');
         });
 }
 
