@@ -556,6 +556,57 @@ class ZS_Store {
         return $ok && $updated;
     }
 
+    /**
+     * Apply the terminal result of an auto-review claim.  The check and the
+     * callback share the session lock so a cancel/restart cannot slip between
+     * authorization and a filesystem side effect in the callback.
+     *
+     * The callback must not make a network request. It returns an array with an
+     * `updates` array and may include a `result` array for its caller.
+     */
+    public function finishAutoReviewClaim($index, $token, $generation, $jobId, $callback) {
+        $store = $this;
+        $result = null;
+        $ok = $this->withNamedLock('session', function () use ($store, $index, $token, $generation, $jobId, $callback, &$result) {
+            $session = $store->loadSessionUnlocked();
+            if (!is_array($session) || !isset($session['infected_files'][$index])) {
+                $store->lastError = 'Auto-review finding is no longer available.';
+                return false;
+            }
+            $job = isset($session['auto_review']) && is_array($session['auto_review'])
+                ? $session['auto_review'] : self::defaultAutoReview();
+            $row = $session['infected_files'][$index];
+            if (
+                !isset($session['generation']) || intval($session['generation']) !== intval($generation) ||
+                !isset($job['status']) || $job['status'] !== 'running' ||
+                !isset($job['job_id']) || !hash_equals((string)$job['job_id'], (string)$jobId) ||
+                !isset($row['status']) || $row['status'] !== 'AI_PROCESSING' ||
+                !isset($row['claim_token']) || !hash_equals((string)$row['claim_token'], (string)$token) ||
+                !isset($row['claim_generation']) || intval($row['claim_generation']) !== intval($generation) ||
+                !isset($row['claim_job']) || !hash_equals((string)$row['claim_job'], (string)$jobId)
+            ) {
+                $store->lastError = 'Auto-review claim is no longer current.';
+                return false;
+            }
+
+            $out = call_user_func($callback);
+            if (!is_array($out) || !isset($out['updates']) || !is_array($out['updates'])) {
+                $store->lastError = 'Auto-review completion returned invalid updates.';
+                return false;
+            }
+            foreach ($out['updates'] as $key => $value) {
+                $session['infected_files'][$index][$key] = $value;
+            }
+            if (!$store->writeJsonFile($store->getSessionFile(), $session)) {
+                $store->lastError = 'Failed to save auto-review result.';
+                return false;
+            }
+            $result = isset($out['result']) && is_array($out['result']) ? $out['result'] : array();
+            return true;
+        });
+        return $ok ? $result : false;
+    }
+
     public function autoReviewStats($session) {
         $stats = array(
             'pending'     => 0,

@@ -115,7 +115,10 @@ class ZS_Quarantine {
             return array('success' => false, 'message' => 'Destination already exists. Restore refused to avoid overwrite.', 'code' => 'DEST_EXISTS', 'path' => $resolved);
         }
 
-        if (!ZS_Config::atomicWrite($resolved, $payload, 0644)) {
+        if (!ZS_Config::atomicWriteNew($resolved, $payload, 0644)) {
+            if (file_exists($resolved) || is_link($resolved)) {
+                return array('success' => false, 'message' => 'Destination already exists. Restore refused to avoid overwrite.', 'code' => 'DEST_EXISTS', 'path' => $resolved);
+            }
             return array('success' => false, 'message' => 'Failed to write restored file.');
         }
         if (hash_file('sha256', $resolved) !== $actualHash) {

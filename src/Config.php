@@ -117,6 +117,56 @@ class ZS_Config {
         return true;
     }
 
+    /**
+     * Publish a new file without ever replacing an existing destination.
+     *
+     * Restore paths have already had their parents checked/created by
+     * ZS_Quarantine.  Unlike atomicWrite(), this intentionally does not call
+     * secureMkdir(): changing permissions on a site's existing directory while
+     * restoring one file would be an unexpected and harmful side effect.
+     */
+    public static function atomicWriteNew($path, $contents, $mode = 0644) {
+        $dir = dirname($path);
+        if (!is_dir($dir) || @is_link($dir) || !is_writable($dir)) {
+            return false;
+        }
+        $tmp = $dir . '/.zs_restore_' . bin2hex(random_bytes(12)) . '.tmp';
+        $fp = @fopen($tmp, 'x');
+        if (!$fp) {
+            return false;
+        }
+        $length = strlen($contents);
+        $written = 0;
+        $ok = true;
+        while ($written < $length) {
+            $n = @fwrite($fp, substr($contents, $written));
+            if ($n === false || $n === 0) {
+                $ok = false;
+                break;
+            }
+            $written += $n;
+        }
+        if (!@fflush($fp)) {
+            $ok = false;
+        }
+        @fclose($fp);
+        if (!$ok || $written !== $length) {
+            @unlink($tmp);
+            return false;
+        }
+        @chmod($tmp, $mode);
+
+        // link() creates the destination atomically and fails if another
+        // process created it after the caller's existence check.
+        if (!@link($tmp, $path)) {
+            @unlink($tmp);
+            return false;
+        }
+        @chmod($path, $mode);
+        @unlink($tmp);
+        return true;
+    }
+
     public static function getRoot() {
         if (defined('ZS_ROOT_DIR') && ZS_ROOT_DIR) {
             return rtrim(ZS_ROOT_DIR, '/\\');

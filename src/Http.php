@@ -52,6 +52,14 @@ class ZS_Http {
         }
 
         if ($method === 'POST' && $action === 'logout') {
+            // Logout changes the browser's authenticated state too.  Do not let
+            // a third-party form silently sign a reviewer out mid-review.
+            if (!self::isCookieAuthenticated($config) || !self::verifyCsrf($config)) {
+                http_response_code(403);
+                header('Content-Type: text/plain; charset=UTF-8');
+                echo 'CSRF validation failed.';
+                return;
+            }
             self::clearAuthCookies();
             header('Location: ' . self::getCurrentScriptUrl());
             exit;
@@ -641,30 +649,54 @@ class ZS_Http {
 
     private static function actionAutoReviewControl($store) {
         $op = isset($_POST['op']) ? $_POST['op'] : '';
-        $session = $store->loadSession();
-        if (!is_array($session)) {
+        if (!in_array($op, array('start', 'pause', 'cancel'), true)) {
+            self::jsonFail(400, 'Invalid auto-review operation.');
+        }
+        $updated = $store->mutateSession(function ($s) use ($op, $store) {
+            if (!is_array($s)) {
+                return false;
+            }
+            $job = isset($s['auto_review']) ? $s['auto_review'] : ZS_Store::defaultAutoReview();
+            if ($op === 'start') {
+                $job['status'] = 'running';
+                $job['job_id'] = bin2hex(random_bytes(8));
+                $job['updated_at'] = time();
+            } elseif ($op === 'pause') {
+                $job['status'] = 'paused';
+                $job['updated_at'] = time();
+            } else {
+                $job['status'] = 'idle';
+                $job['job_id'] = '';
+                $job['updated_at'] = time();
+            }
+
+            // Starting a new job or cancelling the current one must invalidate
+            // in-flight claims immediately.  Otherwise an old browser request
+            // could remain in AI_PROCESSING for 90 seconds and, worse, act after
+            // the user has cancelled it.
+            if ($op === 'start' || $op === 'cancel') {
+                $s['generation'] = isset($s['generation']) ? intval($s['generation']) + 1 : 2;
+                if (!empty($s['infected_files']) && is_array($s['infected_files'])) {
+                    foreach ($s['infected_files'] as &$item) {
+                        if (isset($item['status']) && $item['status'] === 'AI_PROCESSING') {
+                            $item['status'] = 'FOUND';
+                            $item['claim_token'] = '';
+                            $item['claim_job'] = '';
+                            $item['claim_generation'] = 0;
+                            $item['ai_claimed_at'] = 0;
+                        }
+                    }
+                    unset($item);
+                }
+            }
+            $job['stats'] = $store->autoReviewStats($s);
+            $s['auto_review'] = $job;
+            return array('_session' => $s, 'job' => $job);
+        });
+        if ($updated === false || !isset($updated['job'])) {
             self::jsonFail(500, 'No session.');
         }
-        $job = isset($session['auto_review']) ? $session['auto_review'] : ZS_Store::defaultAutoReview();
-        if ($op === 'start') {
-            $job['status'] = 'running';
-            $job['job_id'] = bin2hex(random_bytes(8));
-            $job['updated_at'] = time();
-        } elseif ($op === 'pause') {
-            $job['status'] = 'paused';
-        } elseif ($op === 'cancel') {
-            $job['status'] = 'idle';
-            $job['job_id'] = '';
-        }
-        $job['stats'] = $store->autoReviewStats($session);
-        $store->mutateSession(function ($s) use ($job, $op) {
-            $s['auto_review'] = $job;
-            if ($op === 'cancel' || $op === 'start') {
-                $s['generation'] = isset($s['generation']) ? intval($s['generation']) + 1 : 2;
-            }
-            return $s;
-        });
-        self::jsonOk(array('job' => $job));
+        self::jsonOk(array('job' => $updated['job']));
     }
 
     private static function actionAutoReviewStep($rootDir, $config, $store, $quarantineDir, $dataDir) {
@@ -722,7 +754,20 @@ class ZS_Http {
         $verdict = ZS_Gemini::ask($currentRaw, $path, $content, $reasons, $config, $store, $digest, $hint);
 
         if (isset($verdict['error']) && $verdict['error'] === 'all_cooling') {
-            $store->updateInfectedItem($idx, array('status' => 'FOUND', 'claim_token' => ''), $token, $generation);
+            $finished = $store->finishAutoReviewClaim($idx, $token, $generation, $job['job_id'], function () {
+                return array(
+                    'updates' => array(
+                        'status' => 'FOUND',
+                        'claim_token' => '',
+                        'claim_job' => '',
+                        'claim_generation' => 0,
+                        'ai_claimed_at' => 0,
+                    ),
+                );
+            });
+            if ($finished === false) {
+                self::jsonOk(array('finished' => false, 'action_taken' => 'cancelled', 'stats' => $store->autoReviewStats($store->loadSession())));
+            }
             self::jsonOk(array(
                 'finished'    => false,
                 'error'       => 'all_cooling',
@@ -737,32 +782,49 @@ class ZS_Http {
             self::jsonOk(array('finished' => false, 'action_taken' => 'changed', 'code' => 'CHANGED_SINCE_SCAN'));
         }
 
-        $actionTaken = 'skipped';
-        $newStatus = 'AI_SKIPPED';
-        if (!empty($verdict['error'])) {
-            $actionTaken = 'error';
-            $newStatus = 'AI_ERROR';
-        } elseif (ZS_Gemini::shouldAutoQuarantine($verdict, $coverage)) {
-            $store->revokeCandidate($currentRaw);
-            $qRes = ZS_Quarantine::copyThenUnlink($path, $rootDir, $quarantineDir, array(
-                'finding_id'   => isset($item['finding_id']) ? $item['finding_id'] : '',
-                'expected_raw' => $currentRaw,
-            ));
-            if ($qRes['success']) {
-                $actionTaken = 'quarantined';
-                $newStatus = 'AI_QUARANTINED';
-            } else {
-                $actionTaken = 'failed_quarantine';
-                $newStatus = 'FAILED_DELETE';
+        $shouldQuarantine = ZS_Gemini::shouldAutoQuarantine($verdict, $coverage);
+        $finished = $store->finishAutoReviewClaim($idx, $token, $generation, $job['job_id'], function () use ($verdict, $shouldQuarantine, $path, $rootDir, $quarantineDir, $item, $currentRaw) {
+            $actionTaken = 'skipped';
+            $newStatus = 'AI_SKIPPED';
+            $qRes = array();
+            if (!empty($verdict['error'])) {
+                $actionTaken = 'error';
+                $newStatus = 'AI_ERROR';
+            } elseif ($shouldQuarantine) {
+                $qRes = ZS_Quarantine::copyThenUnlink($path, $rootDir, $quarantineDir, array(
+                    'finding_id'   => isset($item['finding_id']) ? $item['finding_id'] : '',
+                    'expected_raw' => $currentRaw,
+                ));
+                if ($qRes['success']) {
+                    $actionTaken = 'quarantined';
+                    $newStatus = 'AI_QUARANTINED';
+                } else {
+                    $actionTaken = 'failed_quarantine';
+                    $newStatus = 'FAILED_DELETE';
+                }
             }
+
+            return array(
+                'updates' => array(
+                    'status'       => $newStatus,
+                    'ai_verdict'   => $verdict,
+                    'ai_cache_hit' => !empty($verdict['cache_hit']),
+                    'backup_name'  => isset($qRes['backup_name']) ? $qRes['backup_name'] : '',
+                ),
+                'result' => array(
+                    'action_taken' => $actionTaken,
+                    'new_status'   => $newStatus,
+                ),
+            );
+        });
+        if ($finished === false) {
+            self::jsonOk(array('finished' => false, 'action_taken' => 'cancelled', 'stats' => $store->autoReviewStats($store->loadSession())));
+        }
+        if ($shouldQuarantine) {
+            $store->revokeCandidate($currentRaw);
         }
 
-        $store->updateInfectedItem($idx, array(
-            'status'       => $newStatus,
-            'ai_verdict'   => $verdict,
-            'ai_cache_hit' => !empty($verdict['cache_hit']),
-            'backup_name'  => isset($qRes['backup_name']) ? $qRes['backup_name'] : '',
-        ), $token, $generation);
+        $actionTaken = isset($finished['action_taken']) ? $finished['action_taken'] : 'skipped';
 
         $fresh = $store->loadSession();
         self::jsonOk(array(

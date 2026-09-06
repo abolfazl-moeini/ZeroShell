@@ -980,6 +980,7 @@ run_test('F03: restore supports dest_override when original destination exists',
     $base = sys_get_temp_dir() . '/zs_f03_override_' . bin2hex(random_bytes(4));
     $root = $base . '/site';
     @mkdir($root, 0755, true);
+    $rootModeBeforeRestore = fileperms($root) & 0777;
     $qDir = $root . '/quarantine';
 
     $origFile = $root . '/plugin.php';
@@ -1001,6 +1002,8 @@ run_test('F03: restore supports dest_override when original destination exists',
     assert_true($okRestore['success'], 'Restore with dest_override must succeed');
     assert_equals('<?php // original payload', file_get_contents($altFile));
     assert_equals('<?php // new conflicting file', file_get_contents($origFile), 'Conflicting original must not be touched');
+    clearstatcache(true, $root);
+    assert_equals($rootModeBeforeRestore, fileperms($root) & 0777, 'Restoring a file must not change permissions on its existing parent directory');
 
     @unlink($altFile);
     @unlink($origFile);
@@ -1054,6 +1057,49 @@ run_test('F07: auto-review cancel increments session generation rejecting stale 
 
     @unlink($store->getSessionFile());
     @unlink($store->getKnowledgeFile());
+    @rmdir($tempDir);
+});
+
+run_test('F07: terminal auto-review work requires the current job claim before side effects', function () {
+    $tempDir = sys_get_temp_dir() . '/zs_f07_terminal_' . bin2hex(random_bytes(4));
+    @mkdir($tempDir, 0755, true);
+    $store = new ZS_Store($tempDir);
+
+    $session = $store->initSession('/var/www', true);
+    $session['auto_review'] = ZS_Store::defaultAutoReview();
+    $session['auto_review']['status'] = 'running';
+    $session['auto_review']['job_id'] = 'job_alpha';
+    $session['infected_files'] = array(array(
+        'finding_id' => 'f1', 'path' => '/var/www/victim.php', 'status' => 'FOUND',
+        'raw_sha256' => 'hash', 'norm_sha256' => 'norm', 'reason' => 'test', 'size' => 1,
+    ));
+    $store->saveSession($session);
+    $claim = $store->claimNextInfectedForAutoReview('job_alpha');
+    assert_true($claim !== null, 'claim must be created for the running job');
+
+    // This models cancel/restart invalidating the claim while an AI request is in flight.
+    $store->mutateSession(function ($s) {
+        $s['generation']++;
+        $s['auto_review']['status'] = 'idle';
+        $s['auto_review']['job_id'] = '';
+        $s['infected_files'][0]['status'] = 'FOUND';
+        $s['infected_files'][0]['claim_token'] = '';
+        $s['infected_files'][0]['claim_job'] = '';
+        $s['infected_files'][0]['claim_generation'] = 0;
+        return $s;
+    });
+    $sideEffectRan = false;
+    $late = $store->finishAutoReviewClaim(0, $claim['token'], $claim['generation'], 'job_alpha', function () use (&$sideEffectRan) {
+        $sideEffectRan = true;
+        return array('updates' => array('status' => 'AI_QUARANTINED'));
+    });
+    assert_false($late, 'a stale claim must not be allowed to finalize');
+    assert_false($sideEffectRan, 'the callback (and any quarantine side effect) must not run for a stale claim');
+    assert_equals('FOUND', $store->loadSession()['infected_files'][0]['status'], 'cancelled work must leave the finding pending');
+
+    @unlink($store->getSessionFile());
+    @unlink($store->getKnowledgeFile());
+    @unlink($tempDir . '/.lock_session');
     @rmdir($tempDir);
 });
 
@@ -1751,6 +1797,38 @@ run_test('F15: cookiePath normalizes subdirectories without trailing slash', fun
 
     $_SERVER['SCRIPT_NAME'] = 'cleaner.php';
     assert_equals('/', $m->invoke(null), 'Relative script must return /');
+});
+
+run_test('F05: logout rejects cross-site POSTs without the session-bound CSRF token', function () {
+    $tempDir = sys_get_temp_dir() . '/zs_f05_logout_' . bin2hex(random_bytes(4));
+    @mkdir($tempDir, 0755, true);
+    $script = $tempDir . '/logout_without_csrf.php';
+    $code = '<?php
+    define("ZS_INTERNAL", true);
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Config.php', true) . ';
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Store.php', true) . ';
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/I18n.php', true) . ';
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Http.php', true) . ';
+    $root = $argv[1];
+    $keyHash = password_hash("AdminPass1234", PASSWORD_DEFAULT);
+    $secret = "logout_csrf_secret_123456789";
+    ZS_Config::saveConfig(array("key_hash" => $keyHash, "csrf_secret" => $secret), $root);
+    $expiry = time() + 3600;
+    $_COOKIE["zs_session"] = hash_hmac("sha256", "zs_auth:" . $expiry . ":" . $keyHash, $secret) . ":" . $expiry;
+    $_SERVER["REQUEST_METHOD"] = "POST";
+    $_POST = array("do_action" => "logout");
+    ZS_Http::handleRequest($root, $root);
+    ';
+    file_put_contents($script, $code);
+    $bin = (defined('PHP_BINARY') && PHP_BINARY) ? PHP_BINARY : 'php';
+    $out = shell_exec(escapeshellarg($bin) . ' ' . escapeshellarg($script) . ' ' . escapeshellarg($tempDir));
+    assert_true(strpos($out, 'CSRF validation failed.') !== false, 'logout without a CSRF token must be refused');
+
+    @unlink($script);
+    @unlink($tempDir . '/config.php');
+    @unlink($tempDir . '/.htaccess');
+    @unlink($tempDir . '/index.php');
+    @rmdir($tempDir);
 });
 
 // -------------------------------------------------------------
