@@ -587,15 +587,28 @@ class ZS_Http {
         }
         if (isset($_POST['gemini_api_keys']) && trim((string)$_POST['gemini_api_keys']) !== '') {
             $rawKeys = preg_split('/[\r\n,]+/', $_POST['gemini_api_keys']);
-            $keys = array();
+            $submittedKeys = array();
             foreach ($rawKeys as $k) {
                 $t = trim($k);
-                if ($t !== '') {
-                    $keys[] = $t;
+                if ($t !== '' && !in_array($t, $submittedKeys, true)) {
+                    $submittedKeys[] = $t;
                 }
+            }
+            if (!empty($_POST['append_gemini_keys'])) {
+                $keys = ZS_Config::getGeminiKeys($config);
+                foreach ($submittedKeys as $sk) {
+                    if (!in_array($sk, $keys, true)) {
+                        $keys[] = $sk;
+                    }
+                }
+            } else {
+                $keys = $submittedKeys;
             }
             if (!empty($keys)) {
                 $updates['gemini_api_keys'] = $keys;
+                foreach ($submittedKeys as $sk) {
+                    ZS_Config::clearKeyCooldown($sk, $config, $dataDir);
+                }
             }
         }
         if (!empty($_POST['clear_gemini_keys'])) {
@@ -616,7 +629,13 @@ class ZS_Http {
         if (!ZS_Config::saveConfig($updates, $dataDir)) {
             self::jsonFail(500, 'Could not save settings.');
         }
-        self::jsonOk(array('message' => ZS_I18n::t('settings_saved')));
+        $savedConfig = ZS_Config::loadConfig($dataDir);
+        $savedKeys = ZS_Config::getGeminiKeys($savedConfig);
+        self::jsonOk(array(
+            'message'    => ZS_I18n::t('settings_saved'),
+            'has_ai'     => !empty($savedKeys),
+            'keys_count' => count($savedKeys),
+        ));
     }
 
     private static function rulesDigest($rootDir, $dataDir) {
@@ -635,16 +654,23 @@ class ZS_Http {
             $store->updateInfectedItem($resolved['index'], array('status' => 'CHANGED_SINCE_SCAN'));
             self::jsonFail(409, 'File changed since scan.', array('code' => 'CHANGED_SINCE_SCAN'));
         }
+        $config = ZS_Config::loadConfig($dataDir);
         $config['root_dir'] = $rootDir;
         $reasons = isset($resolved['item']['reason']) ? explode(' | ', $resolved['item']['reason']) : array();
         $hint = !empty($resolved['item']['evidence'][0]) ? $resolved['item']['evidence'][0] : '';
         $digest = self::rulesDigest($rootDir, $dataDir);
         $verdict = ZS_Gemini::ask($resolved['raw'], $resolved['path'], $content, $reasons, $config, $store, $digest, $hint);
-        $store->updateInfectedItem($resolved['index'], array('ai_verdict' => $verdict));
-        if ($verdict['verdict'] === 'malicious' && $verdict['confidence'] >= 0.85) {
-            $store->revokeCandidate($resolved['raw']);
+        if (empty($verdict['error'])) {
+            $store->updateInfectedItem($resolved['index'], array('ai_verdict' => $verdict));
+            if ($verdict['verdict'] === 'malicious' && $verdict['confidence'] >= 0.85) {
+                $store->revokeCandidate($resolved['raw']);
+            }
         }
-        self::jsonOk(array('verdict' => $verdict, 'advisory' => true));
+        self::jsonOk(array(
+            'verdict'            => $verdict,
+            'advisory'           => true,
+            'rate_limit_rotated' => !empty($verdict['rate_limit_rotated']),
+        ));
     }
 
     private static function actionAutoReviewControl($store) {
@@ -747,13 +773,14 @@ class ZS_Http {
             self::jsonOk(array('finished' => false, 'action_taken' => 'changed', 'code' => 'CHANGED_SINCE_SCAN', 'path' => $path));
         }
 
+        $config = ZS_Config::loadConfig($dataDir);
         $config['root_dir'] = $rootDir;
         $reasons = isset($item['reason']) ? explode(' | ', $item['reason']) : array();
         $hint = !empty($item['evidence'][0]) ? $item['evidence'][0] : '';
         $digest = self::rulesDigest($rootDir, $dataDir);
         $verdict = ZS_Gemini::ask($currentRaw, $path, $content, $reasons, $config, $store, $digest, $hint);
 
-        if (isset($verdict['error']) && $verdict['error'] === 'all_cooling') {
+        if (isset($verdict['error']) && ($verdict['error'] === 'all_cooling' || $verdict['error'] === 'no_api_key')) {
             $finished = $store->finishAutoReviewClaim($idx, $token, $generation, $job['job_id'], function () {
                 return array(
                     'updates' => array(
@@ -770,7 +797,8 @@ class ZS_Http {
             }
             self::jsonOk(array(
                 'finished'    => false,
-                'error'       => 'all_cooling',
+                'error'       => $verdict['error'],
+                'message'     => isset($verdict['summary']) ? $verdict['summary'] : '',
                 'retry_after' => isset($verdict['retry_after']) ? $verdict['retry_after'] : 20,
             ));
         }
@@ -828,15 +856,16 @@ class ZS_Http {
 
         $fresh = $store->loadSession();
         self::jsonOk(array(
-            'finished'     => false,
-            'path'         => $path,
-            'verdict'      => $verdict['verdict'],
-            'confidence'   => $verdict['confidence'],
-            'cache_hit'    => !empty($verdict['cache_hit']),
-            'action_taken' => $actionTaken,
-            'coverage'     => $coverage,
-            'advisory'     => true,
-            'stats'        => $store->autoReviewStats($fresh),
+            'finished'           => false,
+            'path'               => $path,
+            'verdict'            => $verdict['verdict'],
+            'confidence'         => $verdict['confidence'],
+            'cache_hit'          => !empty($verdict['cache_hit']),
+            'action_taken'       => $actionTaken,
+            'rate_limit_rotated' => !empty($verdict['rate_limit_rotated']),
+            'coverage'           => $coverage,
+            'advisory'           => true,
+            'stats'              => $store->autoReviewStats($fresh),
         ));
     }
 

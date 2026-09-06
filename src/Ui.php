@@ -270,7 +270,7 @@ class ZS_Ui {
             </form>
             <?php if (!empty($infectedJs)) : ?>
                 <button type="button" class="btn btn-purple" id="btnStartReview"><?php echo htmlspecialchars(ZS_I18n::t('btn_review'), ENT_QUOTES, 'UTF-8'); ?></button>
-                <button type="button" class="btn btn-blue" id="btnStartAuto" <?php echo $hasGeminiKeys ? '' : 'disabled'; ?>><?php echo htmlspecialchars(ZS_I18n::t('btn_auto_ai'), ENT_QUOTES, 'UTF-8'); ?></button>
+                <button type="button" class="btn btn-blue" id="btnStartAuto"><?php echo htmlspecialchars(ZS_I18n::t('btn_auto_ai'), ENT_QUOTES, 'UTF-8'); ?></button>
             <?php endif; ?>
         </div>
         <p style="font-size:12px;color:#94a3b8;"><?php echo htmlspecialchars(ZS_I18n::t('ai_advisory'), ENT_QUOTES, 'UTF-8'); ?></p>
@@ -354,7 +354,7 @@ class ZS_Ui {
                     <span><kbd>C</kbd></span><span><kbd>D</kbd></span><span><kbd>N</kbd></span><span><kbd>B</kbd></span><span><kbd>A</kbd></span><span><kbd>Esc</kbd></span>
                 </div>
                 <div class="modal-footer-actions">
-                    <button type="button" class="btn btn-outline" id="modalAskAiBtn" <?php echo $hasGeminiKeys ? '' : 'disabled'; ?>><?php echo htmlspecialchars(ZS_I18n::t('btn_ask_ai'), ENT_QUOTES, 'UTF-8'); ?></button>
+                    <button type="button" class="btn btn-outline" id="modalAskAiBtn"><?php echo htmlspecialchars(ZS_I18n::t('btn_ask_ai'), ENT_QUOTES, 'UTF-8'); ?></button>
                     <button type="button" class="btn btn-gray" id="btnMarkClean"><?php echo htmlspecialchars(ZS_I18n::t('btn_mark_clean'), ENT_QUOTES, 'UTF-8'); ?></button>
                     <button type="button" class="btn btn-blue" id="btnNextBottom"><?php echo htmlspecialchars(ZS_I18n::t('btn_next_keep'), ENT_QUOTES, 'UTF-8'); ?></button>
                     <button type="button" class="btn btn-red" id="modalDeleteBtn"><?php echo htmlspecialchars(ZS_I18n::t('btn_del_next'), ENT_QUOTES, 'UTF-8'); ?></button>
@@ -446,6 +446,32 @@ class ZS_Ui {
                         <button type="button" class="btn btn-green" data-restore="<?php echo htmlspecialchars($bName, ENT_QUOTES, 'UTF-8'); ?>"><?php echo htmlspecialchars(ZS_I18n::t('settings_btn_restore'), ENT_QUOTES, 'UTF-8'); ?></button>
                     </div>
                 <?php endforeach; endif; ?>
+            </div>
+        </div>
+    </div>
+
+    <div id="geminiKeyModal" class="modal-overlay">
+        <div class="modal-content modal-sm" role="dialog" aria-labelledby="geminiKeyModalTitle">
+            <div class="modal-header">
+                <strong id="geminiKeyModalTitle" style="color:#38bdf8;"><?php echo htmlspecialchars(ZS_I18n::t('gemini_key_modal_title'), ENT_QUOTES, 'UTF-8'); ?></strong>
+                <button type="button" class="modal-close" id="btnCloseGeminiKeyModal">&times;</button>
+            </div>
+            <div class="modal-body-standard">
+                <p id="geminiKeyModalDesc"><?php echo htmlspecialchars(ZS_I18n::t('gemini_key_modal_desc'), ENT_QUOTES, 'UTF-8'); ?></p>
+                <div id="geminiKeyRateLimitNotice" style="display:none;background:#450a0a;border:1px solid #b91c1c;color:#fecaca;padding:10px 12px;border-radius:6px;margin-bottom:14px;font-size:13px;line-height:1.5;">
+                    <?php echo htmlspecialchars(ZS_I18n::t('gemini_key_ratelimit_notice'), ENT_QUOTES, 'UTF-8'); ?>
+                </div>
+                <form id="formGeminiKeyModal">
+                    <div class="form-group">
+                        <label for="modal_gemini_api_keys"><?php echo htmlspecialchars(ZS_I18n::t('gemini_key_input_label'), ENT_QUOTES, 'UTF-8'); ?></label>
+                        <textarea id="modal_gemini_api_keys" class="form-textarea" rows="3" placeholder="<?php echo htmlspecialchars(ZS_I18n::t('settings_keys_placeholder'), ENT_QUOTES, 'UTF-8'); ?>"></textarea>
+                        <p style="font-size:12px;color:#94a3b8;margin-top:4px;"><?php echo htmlspecialchars(ZS_I18n::t('gemini_key_hint'), ENT_QUOTES, 'UTF-8'); ?></p>
+                    </div>
+                    <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:16px;">
+                        <button type="button" class="btn btn-gray" id="btnCancelGeminiKeyModal"><?php echo htmlspecialchars(ZS_I18n::t('gemini_key_btn_cancel'), ENT_QUOTES, 'UTF-8'); ?></button>
+                        <button type="submit" class="btn btn-blue" id="btnSaveGeminiKeyModal"><?php echo htmlspecialchars(ZS_I18n::t('gemini_key_btn_save'), ENT_QUOTES, 'UTF-8'); ?></button>
+                    </div>
+                </form>
             </div>
         </div>
     </div>

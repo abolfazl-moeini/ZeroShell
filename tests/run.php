@@ -1909,6 +1909,575 @@ run_test('F07: session and knowledge safely store and load findings with invalid
 });
 
 // -------------------------------------------------------------
+// Gemini Key Modal, Multiple Keys & Rate Limit Handling
+// -------------------------------------------------------------
+$prevEnvKey = getenv('GEMINI_API_KEY');
+$prevEnvKeys = getenv('GEMINI_API_KEYS');
+putenv('GEMINI_API_KEY');
+putenv('GEMINI_API_KEYS');
+unset($_ENV['GEMINI_API_KEY'], $_ENV['GEMINI_API_KEYS'], $_SERVER['GEMINI_API_KEY'], $_SERVER['GEMINI_API_KEYS']);
+
+if (!function_exists('run_zs_test_worker_action')) {
+    function run_zs_test_worker_action($rootDir, $dataDir, $postData, $mockGeminiCode = '') {
+        $bin = (defined('PHP_BINARY') && PHP_BINARY) ? PHP_BINARY : 'php';
+        $worker = $dataDir . '/_test_action_worker.php';
+        $postExport = var_export($postData, true);
+        $script = '<?php
+        define("ZS_INTERNAL", true);
+        putenv("GEMINI_API_KEY");
+        putenv("GEMINI_API_KEYS");
+        unset($_ENV["GEMINI_API_KEY"], $_ENV["GEMINI_API_KEYS"], $_SERVER["GEMINI_API_KEY"], $_SERVER["GEMINI_API_KEYS"]);
+        require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Hash.php', true) . ';
+        require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Config.php', true) . ';
+        require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/I18n.php', true) . ';
+        require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Rules.php', true) . ';
+        require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Store.php', true) . ';
+        require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Quarantine.php', true) . ';
+        require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Engine.php', true) . ';
+        require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Gemini.php', true) . ';
+        require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Share.php', true) . ';
+        require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Http.php', true) . ';
+        require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Ui.php', true) . ';
+
+        $rootDir = $argv[1];
+        $dataDir = $argv[2];
+        $config = ZS_Config::loadConfig($dataDir);
+
+        $keyHash = isset($config["key_hash"]) ? $config["key_hash"] : "";
+        $csrfSecret = isset($config["csrf_secret"]) ? $config["csrf_secret"] : "csrf_test_secret_123456";
+
+        $authExpiry = time() + 3600;
+        $authHmac = hash_hmac("sha256", "zs_auth:" . $authExpiry . ":" . $keyHash, $csrfSecret);
+        $sessionCookie = $authHmac . ":" . $authExpiry;
+        $_COOKIE["zs_session"] = $sessionCookie;
+
+        $csrfExpiry = time() + 3600;
+        $csrfHmac = hash_hmac("sha256", "zs_csrf:" . $csrfExpiry . ":" . $sessionCookie, $csrfSecret);
+        $csrfToken = $csrfHmac . ":" . $csrfExpiry;
+        $_COOKIE["zs_csrf"] = $csrfToken;
+
+        $_SERVER["REQUEST_METHOD"] = "POST";
+        $_SERVER["HTTP_X_CSRF_TOKEN"] = $csrfToken;
+        $_SERVER["HTTP_ACCEPT"] = "application/json";
+        $_POST = ' . $postExport . ';
+        $_POST["csrf_token"] = $csrfToken;
+
+        ' . $mockGeminiCode . '
+
+        ZS_Http::handleRequest($rootDir, $dataDir);
+        ';
+        file_put_contents($worker, $script);
+        $output = shell_exec(escapeshellarg($bin) . ' ' . escapeshellarg($worker) . ' ' . escapeshellarg($rootDir) . ' ' . escapeshellarg($dataDir));
+        @unlink($worker);
+        return json_decode($output, true);
+    }
+}
+
+run_test('Gemini key modal: save_settings handles multiple keys, deduplication and append', function () {
+    $tempDir = sys_get_temp_dir() . '/zs_keys_save_' . bin2hex(random_bytes(4));
+    $rootDir = $tempDir . '/site';
+    $dataDir = $tempDir . '/data';
+    @mkdir($rootDir, 0755, true);
+    @mkdir($dataDir, 0755, true);
+
+    $keyHash = password_hash('SecretPass1234', PASSWORD_DEFAULT);
+    ZS_Config::saveConfig(array(
+        'key_hash'    => $keyHash,
+        'csrf_secret' => 'csrf_secret_abcdef123456',
+    ), $dataDir);
+
+    // Save multiple keys with commas and newlines
+    $res1 = run_zs_test_worker_action($rootDir, $dataDir, array(
+        'do_action'       => 'save_settings',
+        'gemini_api_keys' => "key_alpha\nkey_beta, key_gamma, key_alpha",
+    ));
+    assert_true(is_array($res1) && !empty($res1['success']), 'save_settings must succeed');
+    assert_true(!empty($res1['has_ai']), 'has_ai must be true');
+    assert_equals(3, $res1['keys_count'], 'must save 3 unique keys');
+
+    $cfg1 = ZS_Config::loadConfig($dataDir);
+    assert_equals(array('key_alpha', 'key_beta', 'key_gamma'), $cfg1['gemini_api_keys'], 'config must have parsed 3 unique keys');
+
+    // Append new key
+    $res2 = run_zs_test_worker_action($rootDir, $dataDir, array(
+        'do_action'          => 'save_settings',
+        'gemini_api_keys'    => 'key_delta, key_beta',
+        'append_gemini_keys' => '1',
+    ));
+    assert_true(is_array($res2) && !empty($res2['success']), 'append save_settings must succeed');
+    assert_equals(4, $res2['keys_count'], 'must now have 4 unique keys');
+
+    $cfg2 = ZS_Config::loadConfig($dataDir);
+    assert_equals(array('key_alpha', 'key_beta', 'key_gamma', 'key_delta'), $cfg2['gemini_api_keys'], 'config must have 4 keys appended');
+
+    // Blank / whitespace / comma-only input must NOT wipe out existing keys
+    $resBlank = run_zs_test_worker_action($rootDir, $dataDir, array(
+        'do_action'       => 'save_settings',
+        'gemini_api_keys' => "   ,   \n  ",
+    ));
+    assert_true(!empty($resBlank['success']), 'blank save_settings must succeed');
+    $cfgBlank = ZS_Config::loadConfig($dataDir);
+    assert_equals(array('key_alpha', 'key_beta', 'key_gamma', 'key_delta'), $cfgBlank['gemini_api_keys'], 'blank keys must NOT wipe out stored keys');
+
+    @unlink($dataDir . '/config.php');
+    @rmdir($dataDir);
+    @rmdir($rootDir);
+    @rmdir($tempDir);
+});
+
+run_test('Gemini key modal: ask_ai returns advisory no_api_key when unconfigured, recovers upon saving keys', function () {
+    $tempDir = sys_get_temp_dir() . '/zs_ask_no_key_' . bin2hex(random_bytes(4));
+    $rootDir = $tempDir . '/site';
+    $dataDir = $tempDir . '/data';
+    @mkdir($rootDir, 0755, true);
+    @mkdir($dataDir, 0755, true);
+
+    $keyHash = password_hash('SecretPass1234', PASSWORD_DEFAULT);
+    ZS_Config::saveConfig(array(
+        'key_hash'        => $keyHash,
+        'csrf_secret'     => 'csrf_secret_abcdef123456',
+        'gemini_api_keys' => array(),
+    ), $dataDir);
+
+    $store = new ZS_Store($dataDir);
+    $session = $store->initSession($rootDir, true);
+    $badFile = $rootDir . '/shell.php';
+    file_put_contents($badFile, '<?php eval($_GET["cmd"]);');
+    $rawHash = hash('sha256', '<?php eval($_GET["cmd"]);');
+
+    $session['infected_files'] = array(
+        array(
+            'finding_id'      => 'find_test_1',
+            'path'            => $badFile,
+            'raw_sha256'      => $rawHash,
+            'norm_sha256'     => $rawHash,
+            'reason'          => 'eval',
+            'rule_ids'        => array('SIG-01'),
+            'evidence'        => array('eval'),
+            'status'          => 'FOUND',
+            'size'            => 25,
+            'coverage'        => 'full',
+            'scan_session_id' => $session['scan_session_id'],
+        ),
+    );
+    $store->saveSession($session);
+
+    // Call ask_ai with no API key
+    $resNoKey = run_zs_test_worker_action($rootDir, $dataDir, array(
+        'do_action'       => 'ask_ai',
+        'finding_id'      => 'find_test_1',
+        'scan_session_id' => $session['scan_session_id'],
+        'expected_raw'    => $rawHash,
+    ));
+
+    assert_true(is_array($resNoKey) && !empty($resNoKey['success']), 'ask_ai must succeed in returning JSON response');
+    assert_true(!empty($resNoKey['advisory']), 'must return advisory: true');
+    assert_true(isset($resNoKey['verdict']['error']) && $resNoKey['verdict']['error'] === 'no_api_key', 'verdict error must be no_api_key');
+    assert_equals('No Gemini API key configured.', $resNoKey['verdict']['summary'], 'summary must match No Gemini API key configured.');
+
+    $sessAfterNoKey = $store->loadSession();
+    assert_true(empty($sessAfterNoKey['infected_files'][0]['ai_verdict']), 'finding ai_verdict must NOT be saved into session on no_api_key error');
+
+    // Now save keys via save_settings
+    $resSave = run_zs_test_worker_action($rootDir, $dataDir, array(
+        'do_action'       => 'save_settings',
+        'gemini_api_keys' => 'AIzaSyValidTestKey123',
+    ));
+    assert_true(!empty($resSave['success']), 'saving key must succeed');
+
+    // Call ask_ai again with mocked successful Gemini response
+    $mockSuccess = 'ZS_Gemini::$http = function ($url, $headers, $payloadJson, $method) {
+        return array(
+            "status" => 200,
+            "body" => json_encode(array(
+                "candidates" => array(
+                    array(
+                        "finishReason" => "STOP",
+                        "content" => array(
+                            "parts" => array(
+                                array("text" => json_encode(array(
+                                    "verdict"            => "malicious",
+                                    "confidence"         => 0.96,
+                                    "summary"            => "Confirmed web shell backdoor",
+                                    "recommended_action" => "quarantine",
+                                )))
+                            )
+                        )
+                    )
+                )
+            )),
+        );
+    };';
+
+    $resWithKey = run_zs_test_worker_action($rootDir, $dataDir, array(
+        'do_action'       => 'ask_ai',
+        'finding_id'      => 'find_test_1',
+        'scan_session_id' => $session['scan_session_id'],
+        'expected_raw'    => $rawHash,
+    ), $mockSuccess);
+
+    assert_true(is_array($resWithKey) && !empty($resWithKey['success']), 'ask_ai with key must succeed');
+    assert_equals('malicious', $resWithKey['verdict']['verdict'], 'verdict must now be malicious');
+    assert_equals(0.96, $resWithKey['verdict']['confidence'], 'confidence must match 0.96');
+
+    @unlink($badFile);
+    @unlink($dataDir . '/config.php');
+    @unlink($store->getSessionFile());
+    @unlink($store->getKnowledgeFile());
+    @rmdir($dataDir);
+    @rmdir($rootDir);
+    @rmdir($tempDir);
+});
+
+run_test('Gemini key modal: multiple keys failover on 429 and rate-limit prompt on all_cooling', function () {
+    $tempDir = sys_get_temp_dir() . '/zs_rate_limit_' . bin2hex(random_bytes(4));
+    $rootDir = $tempDir . '/site';
+    $dataDir = $tempDir . '/data';
+    @mkdir($rootDir, 0755, true);
+    @mkdir($dataDir, 0755, true);
+
+    $keyHash = password_hash('SecretPass1234', PASSWORD_DEFAULT);
+    ZS_Config::saveConfig(array(
+        'key_hash'        => $keyHash,
+        'csrf_secret'     => 'csrf_secret_abcdef123456',
+        'gemini_api_keys' => array('key_rate_limited_1', 'key_working_2'),
+    ), $dataDir);
+
+    $store = new ZS_Store($dataDir);
+    $session = $store->initSession($rootDir, true);
+    $badFile = $rootDir . '/suspicious.php';
+    file_put_contents($badFile, '<?php passthru($_POST["c"]);');
+    $rawHash = hash('sha256', '<?php passthru($_POST["c"]);');
+
+    $badFile2 = $rootDir . '/suspicious2.php';
+    file_put_contents($badFile2, '<?php exec($_POST["x"]);');
+    $rawHash2 = hash('sha256', '<?php exec($_POST["x"]);');
+
+    $session['infected_files'] = array(
+        array(
+            'finding_id'      => 'find_rate_1',
+            'path'            => $badFile,
+            'raw_sha256'      => $rawHash,
+            'norm_sha256'     => $rawHash,
+            'reason'          => 'passthru',
+            'rule_ids'        => array('SIG-02'),
+            'evidence'        => array('passthru'),
+            'status'          => 'FOUND',
+            'size'            => 27,
+            'coverage'        => 'full',
+            'scan_session_id' => $session['scan_session_id'],
+        ),
+        array(
+            'finding_id'      => 'find_rate_2',
+            'path'            => $badFile2,
+            'raw_sha256'      => $rawHash2,
+            'norm_sha256'     => $rawHash2,
+            'reason'          => 'exec',
+            'rule_ids'        => array('SIG-03'),
+            'evidence'        => array('exec'),
+            'status'          => 'FOUND',
+            'size'            => 24,
+            'coverage'        => 'full',
+            'scan_session_id' => $session['scan_session_id'],
+        ),
+    );
+    $store->saveSession($session);
+
+    // Mock 1: key_rate_limited_1 returns 429, key_working_2 returns 200
+    $mockFailover = 'ZS_Gemini::$http = function ($url, $headers, $payloadJson, $method) {
+        foreach ($headers as $h) {
+            if (strpos($h, "key_rate_limited_1") !== false) {
+                return array("status" => 429, "body" => "RESOURCE_EXHAUSTED", "retry_after" => 60);
+            }
+            if (strpos($h, "key_working_2") !== false) {
+                return array(
+                    "status" => 200,
+                    "body" => json_encode(array(
+                        "candidates" => array(
+                            array(
+                                "finishReason" => "STOP",
+                                "content" => array(
+                                    "parts" => array(
+                                        array("text" => json_encode(array(
+                                            "verdict"            => "malicious",
+                                            "confidence"         => 0.92,
+                                            "summary"            => "Failover success on key 2",
+                                            "recommended_action" => "quarantine",
+                                        )))
+                                    )
+                                )
+                            )
+                        )
+                    )),
+                );
+            }
+        }
+        return array("status" => 500, "body" => "Unknown key");
+    };';
+
+    $resFailover = run_zs_test_worker_action($rootDir, $dataDir, array(
+        'do_action'       => 'ask_ai',
+        'finding_id'      => 'find_rate_1',
+        'scan_session_id' => $session['scan_session_id'],
+        'expected_raw'    => $rawHash,
+    ), $mockFailover);
+
+    assert_true(is_array($resFailover) && !empty($resFailover['success']), 'ask_ai failover must succeed');
+    assert_equals('Failover success on key 2', $resFailover['verdict']['summary'], 'must use second key after first hits 429');
+    assert_true(!empty($resFailover['rate_limit_rotated']), 'rate_limit_rotated flag must be true on failover');
+
+    // Verify key 1 was marked in cooldown
+    $cfgLoaded = ZS_Config::loadConfig($dataDir);
+    assert_true(ZS_Config::isKeyCooling('key_rate_limited_1', $cfgLoaded, $dataDir), 'key 1 must be marked in cooldown');
+
+    // Mock 2: both keys return 429 -> all_cooling error on uncached finding find_rate_2
+    $mockAll429 = 'ZS_Gemini::$http = function ($url, $headers, $payloadJson, $method) {
+        return array("status" => 429, "body" => "RESOURCE_EXHAUSTED", "retry_after" => 30);
+    };';
+
+    $resAllCooling = run_zs_test_worker_action($rootDir, $dataDir, array(
+        'do_action'       => 'ask_ai',
+        'finding_id'      => 'find_rate_2',
+        'scan_session_id' => $session['scan_session_id'],
+        'expected_raw'    => $rawHash2,
+    ), $mockAll429);
+
+    assert_true(is_array($resAllCooling) && !empty($resAllCooling['success']), 'response must succeed');
+    assert_equals('all_cooling', $resAllCooling['verdict']['error'], 'verdict error must be all_cooling');
+
+    $sessAfterCooling = $store->loadSession();
+    assert_true(empty($sessAfterCooling['infected_files'][1]['ai_verdict']), 'finding ai_verdict must NOT be saved into session on all_cooling error');
+
+    // Appending a fresh key allows immediate recovery
+    $resAppend = run_zs_test_worker_action($rootDir, $dataDir, array(
+        'do_action'          => 'save_settings',
+        'gemini_api_keys'    => 'fresh_key_unlimited_3',
+        'append_gemini_keys' => '1',
+    ));
+    assert_true(!empty($resAppend['success']), 'appending fresh key must succeed');
+
+    $cfgRecovered = ZS_Config::loadConfig($dataDir);
+    $activeKey = ZS_Config::getActiveGeminiKey($cfgRecovered, $dataDir);
+    assert_equals('fresh_key_unlimited_3', $activeKey, 'new key must be immediately active because previous keys are cooling');
+
+    @unlink($badFile);
+    @unlink($badFile2);
+    @unlink($dataDir . '/config.php');
+    @unlink($dataDir . '/cooldowns.php');
+    @unlink($store->getSessionFile());
+    @unlink($store->getKnowledgeFile());
+    @rmdir($dataDir);
+    @rmdir($rootDir);
+    @rmdir($tempDir);
+});
+
+run_test('Gemini key modal: auto_review_step releases claim on no_api_key or all_cooling', function () {
+    $tempDir = sys_get_temp_dir() . '/zs_auto_nokey_' . bin2hex(random_bytes(4));
+    $rootDir = $tempDir . '/site';
+    $dataDir = $tempDir . '/data';
+    @mkdir($rootDir, 0755, true);
+    @mkdir($dataDir, 0755, true);
+
+    $keyHash = password_hash('SecretPass1234', PASSWORD_DEFAULT);
+    ZS_Config::saveConfig(array(
+        'key_hash'        => $keyHash,
+        'csrf_secret'     => 'csrf_secret_abcdef123456',
+        'gemini_api_keys' => array(),
+    ), $dataDir);
+
+    $store = new ZS_Store($dataDir);
+    $session = $store->initSession($rootDir, true);
+    $badFile = $rootDir . '/victim.php';
+    file_put_contents($badFile, '<?php system($_GET["x"]);');
+    $rawHash = hash('sha256', '<?php system($_GET["x"]);');
+
+    $session['infected_files'] = array(
+        array(
+            'finding_id'      => 'find_auto_1',
+            'path'            => $badFile,
+            'raw_sha256'      => $rawHash,
+            'norm_sha256'     => $rawHash,
+            'reason'          => 'system',
+            'rule_ids'        => array('SIG-03'),
+            'evidence'        => array('system'),
+            'status'          => 'FOUND',
+            'size'            => 25,
+            'coverage'        => 'full',
+            'scan_session_id' => $session['scan_session_id'],
+        ),
+    );
+    $store->saveSession($session);
+
+    // 1. Start auto review
+    $resStart = run_zs_test_worker_action($rootDir, $dataDir, array(
+        'do_action' => 'auto_review_control',
+        'op'        => 'start',
+    ));
+    assert_true(!empty($resStart['success']), 'auto_review_control start must succeed');
+
+    // 2. Step with no keys configured: must return error: no_api_key and keep item as FOUND
+    $resStepNoKey = run_zs_test_worker_action($rootDir, $dataDir, array(
+        'do_action' => 'auto_review_step',
+    ));
+    assert_true(is_array($resStepNoKey) && !empty($resStepNoKey['success']), 'auto_review_step must respond');
+    assert_equals('no_api_key', $resStepNoKey['error'], 'auto_review_step must report no_api_key');
+
+    $sessAfterNoKey = $store->loadSession();
+    assert_equals('FOUND', $sessAfterNoKey['infected_files'][0]['status'], 'Finding status must remain FOUND instead of converting to AI_ERROR');
+
+    // 3. Configure a key, but mock all keys cooling
+    ZS_Config::saveConfig(array(
+        'gemini_api_keys' => array('test_key_cooling'),
+    ), $dataDir);
+
+    $mockCooling = 'ZS_Gemini::$http = function ($url, $headers, $payloadJson, $method) {
+        return array("status" => 429, "body" => "RESOURCE_EXHAUSTED", "retry_after" => 25);
+    };';
+
+    $resStepCooling = run_zs_test_worker_action($rootDir, $dataDir, array(
+        'do_action' => 'auto_review_step',
+    ), $mockCooling);
+
+    assert_true(is_array($resStepCooling) && !empty($resStepCooling['success']), 'auto_review_step must respond');
+    assert_equals('all_cooling', $resStepCooling['error'], 'auto_review_step must report all_cooling');
+    assert_true(!empty($resStepCooling['retry_after']), 'retry_after must be set');
+
+    $sessAfterCooling = $store->loadSession();
+    assert_equals('FOUND', $sessAfterCooling['infected_files'][0]['status'], 'Finding status must remain FOUND so it can be resumed');
+
+    @unlink($badFile);
+    @unlink($dataDir . '/config.php');
+    @unlink($dataDir . '/cooldowns.php');
+    @unlink($store->getSessionFile());
+    @unlink($store->getKnowledgeFile());
+    @rmdir($dataDir);
+    @rmdir($rootDir);
+    @rmdir($tempDir);
+});
+
+run_test('Gemini key modal: UI renders geminiKeyModal and bilingual i18n completeness', function () {
+    $tempDir = sys_get_temp_dir() . '/zs_ui_modal_' . bin2hex(random_bytes(4));
+    $rootDir = $tempDir . '/site';
+    $dataDir = $tempDir . '/data';
+    @mkdir($rootDir, 0755, true);
+    @mkdir($dataDir, 0755, true);
+
+    $store = new ZS_Store($dataDir);
+    $session = $store->initSession($rootDir, true);
+    $session['infected_files'] = array(
+        array(
+            'finding_id'      => 'fid_ui_1',
+            'path'            => $rootDir . '/bad.php',
+            'raw_sha256'      => hash('sha256', 'bad'),
+            'norm_sha256'     => hash('sha256', 'bad'),
+            'reason'          => 'eval',
+            'rule_ids'        => array('SIG-01'),
+            'evidence'        => array('eval'),
+            'status'          => 'FOUND',
+            'size'            => 10,
+            'coverage'        => 'full',
+            'scan_session_id' => $session['scan_session_id'],
+        ),
+    );
+    $config = array(
+        'key_hash'        => password_hash('Pass12345678', PASSWORD_DEFAULT),
+        'csrf_secret'     => 'csrf_secret_ui_test',
+        'gemini_api_keys' => array(),
+    );
+
+    ob_start();
+    ZS_Ui::renderReport($session, $rootDir, $dataDir, $config, $store);
+    $html = ob_get_clean();
+
+    assert_true(strpos($html, 'id="geminiKeyModal"') !== false, 'HTML must render geminiKeyModal');
+    assert_true(strpos($html, 'id="modal_gemini_api_keys"') !== false, 'HTML must contain modal_gemini_api_keys textarea');
+    assert_true(strpos($html, 'id="geminiKeyRateLimitNotice"') !== false, 'HTML must contain geminiKeyRateLimitNotice');
+    assert_true(strpos($html, 'id="btnSaveGeminiKeyModal"') !== false, 'HTML must contain btnSaveGeminiKeyModal');
+    assert_true(strpos($html, 'id="btnStartAuto"') !== false, 'HTML must contain btnStartAuto');
+    assert_true(strpos($html, 'id="modalAskAiBtn"') !== false, 'HTML must contain modalAskAiBtn');
+
+    // Check that required i18n keys are loaded
+    $allEn = ZS_I18n::getAll();
+    $requiredKeys = array(
+        'gemini_key_modal_title',
+        'gemini_key_ratelimit_title',
+        'gemini_key_modal_desc',
+        'gemini_key_ratelimit_notice',
+        'gemini_key_input_label',
+        'gemini_key_hint',
+        'gemini_key_btn_save',
+        'gemini_key_btn_cancel',
+        'gemini_key_required_prompt',
+        'gemini_key_rotated_notice',
+    );
+    foreach ($requiredKeys as $rk) {
+        assert_true(!empty($allEn[$rk]), "i18n key {$rk} must exist and be non-empty");
+    }
+
+    $css = file_get_contents(dirname(dirname(__FILE__)) . '/src/assets/app.css');
+    assert_true(strpos($css, '#geminiKeyModal.modal-overlay { z-index: 15000; }') !== false, 'CSS must have explicit z-index 15000 for geminiKeyModal');
+
+    @unlink($dataDir . '/session.php');
+    @rmdir($dataDir);
+    @rmdir($rootDir);
+    @rmdir($tempDir);
+});
+
+run_test('Gemini key modal: saving a cooling key clears its cooldown immediately', function () {
+    $tempDir = sys_get_temp_dir() . '/zs_clear_cd_' . bin2hex(random_bytes(4));
+    $rootDir = $tempDir . '/site';
+    $dataDir = $tempDir . '/data';
+    @mkdir($rootDir, 0755, true);
+    @mkdir($dataDir, 0755, true);
+
+    $keyHash = password_hash('SecretPass1234', PASSWORD_DEFAULT);
+    ZS_Config::saveConfig(array(
+        'key_hash'        => $keyHash,
+        'csrf_secret'     => 'csrf_secret_abcdef123456',
+        'gemini_api_keys' => array('stale_cooling_key'),
+    ), $dataDir);
+
+    // Save cooldown directly to cooldowns.php as a previous process would
+    $fp = substr(hash('sha256', 'stale_cooling_key'), 0, 16);
+    ZS_Config::saveCooldowns(array($fp => time() + 120), $dataDir);
+    $persistedBefore = ZS_Config::loadCooldowns($dataDir);
+    assert_true(isset($persistedBefore[$fp]), 'fingerprint must be in cooldowns.php before save');
+
+    // Re-saving the key via save_settings clears its cooldown
+    $res = run_zs_test_worker_action($rootDir, $dataDir, array(
+        'do_action'          => 'save_settings',
+        'gemini_api_keys'    => 'stale_cooling_key',
+        'append_gemini_keys' => '1',
+    ));
+    assert_true(!empty($res['success']), 'save_settings must succeed');
+
+    $persistedAfter = ZS_Config::loadCooldowns($dataDir);
+    assert_false(isset($persistedAfter[$fp]), 'saving cooling key must remove its fingerprint from cooldowns.php');
+
+    // Also test direct ZS_Config::clearKeyCooldown helper
+    $cfg = ZS_Config::loadConfig($dataDir);
+    ZS_Config::markKeyCooldown('direct_test_key', 60, $cfg, $dataDir);
+    assert_true(ZS_Config::isKeyCooling('direct_test_key', $cfg, $dataDir), 'direct_test_key must be cooling');
+    ZS_Config::clearKeyCooldown('direct_test_key', $cfg, $dataDir);
+    assert_false(ZS_Config::isKeyCooling('direct_test_key', $cfg, $dataDir), 'direct_test_key must no longer be cooling after clearKeyCooldown');
+
+    @unlink($dataDir . '/config.php');
+    @unlink($dataDir . '/cooldowns.php');
+    @rmdir($dataDir);
+    @rmdir($rootDir);
+    @rmdir($tempDir);
+});
+
+if ($prevEnvKey !== false) {
+    putenv('GEMINI_API_KEY=' . $prevEnvKey);
+    $_ENV['GEMINI_API_KEY'] = $prevEnvKey;
+}
+if ($prevEnvKeys !== false) {
+    putenv('GEMINI_API_KEYS=' . $prevEnvKeys);
+    $_ENV['GEMINI_API_KEYS'] = $prevEnvKeys;
+}
+
+// -------------------------------------------------------------
 // Summary
 // -------------------------------------------------------------
 echo "\n===================================\n";

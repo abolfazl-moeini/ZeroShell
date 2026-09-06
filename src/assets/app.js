@@ -268,20 +268,74 @@ function markCleanCurrent() {
     });
 }
 
+let pendingAiCallback = null;
+let isKeyModalRateLimit = false;
+
+function openGeminiKeyModal(onSuccess, isRateLimit) {
+    pendingAiCallback = onSuccess || null;
+    isKeyModalRateLimit = !!isRateLimit;
+    const modal = document.getElementById('geminiKeyModal');
+    if (!modal) return;
+    const notice = document.getElementById('geminiKeyRateLimitNotice');
+    if (notice) {
+        notice.style.display = isRateLimit ? 'block' : 'none';
+    }
+    const title = document.getElementById('geminiKeyModalTitle');
+    if (title) {
+        title.textContent = isRateLimit ? t('gemini_key_ratelimit_title') : t('gemini_key_modal_title');
+    }
+    const input = document.getElementById('modal_gemini_api_keys');
+    if (input) {
+        input.value = '';
+    }
+    modal.classList.add('active');
+    if (input) {
+        setTimeout(function () { input.focus(); }, 50);
+    }
+}
+
+function closeGeminiKeyModal() {
+    const modal = document.getElementById('geminiKeyModal');
+    if (modal) modal.classList.remove('active');
+    isKeyModalRateLimit = false;
+    pendingAiCallback = null;
+}
+
 function askAiCurrent() {
     const file = currentFile();
     if (!file) return;
+    if (!window.ZS_BOOT || !window.ZS_BOOT.has_ai) {
+        openGeminiKeyModal(function () {
+            askAiCurrent();
+        });
+        return;
+    }
     const btn = document.getElementById('modalAskAiBtn');
     if (btn) btn.disabled = true;
     const fields = findingFields(file);
     fields.do_action = 'ask_ai';
     postForm(fields).then(function (data) {
         if (btn) btn.disabled = false;
+        if (data.rate_limit_rotated) {
+            showToast(t('gemini_key_rotated_notice'));
+        }
         if (data.success && data.verdict) {
+            if (data.verdict.error === 'no_api_key' || (data.verdict.summary && data.verdict.summary.indexOf('No Gemini API key configured') !== -1)) {
+                openGeminiKeyModal(function () {
+                    askAiCurrent();
+                });
+                return;
+            }
+            if (data.verdict.error === 'all_cooling') {
+                openGeminiKeyModal(function () {
+                    askAiCurrent();
+                }, true);
+                return;
+            }
             file.ai_verdict = data.verdict;
             const aiBadge = document.getElementById('modalAiBadge');
             aiBadge.style.display = 'inline-block';
-            aiBadge.textContent = 'AI: ' + data.verdict.verdict + ' — ' + t('ai_advisory_short');
+            aiBadge.textContent = 'AI: ' + data.verdict.verdict + ' (' + Math.round((data.verdict.confidence || 0) * 100) + '%) — ' + t('ai_advisory_short');
             showToast((data.verdict.summary || data.verdict.verdict) + ' (' + t('ai_advisory_short') + ')');
         } else {
             alert(data.message || t('err_ai_failed'));
@@ -317,7 +371,9 @@ function clearAutoTimer() {
 function startAutoAiReview() {
     if (autoReviewActive) return;
     if (!window.ZS_BOOT || !window.ZS_BOOT.has_ai) {
-        alert(t('ai_need_key'));
+        openGeminiKeyModal(function () {
+            startAutoAiReview();
+        });
         return;
     }
     if (!confirm(t('ai_sends_code'))) return;
@@ -392,11 +448,25 @@ function runAutoReviewNextStep() {
             setTimeout(function () { window.location.reload(); }, 1200);
             return;
         }
+        if (data.error === 'no_api_key') {
+            pauseAutoReview();
+            document.getElementById('autoReviewProgressText').textContent = t('ai_need_key');
+            openGeminiKeyModal(function () {
+                resumeAutoReview();
+            });
+            return;
+        }
         if (data.error === 'all_cooling') {
             const wait = (data.retry_after || 20) * 1000;
-            document.getElementById('autoReviewProgressText').textContent = t('auto_ai_rate_limit');
-            autoTimer = setTimeout(runAutoReviewNextStep, wait);
+            document.getElementById('autoReviewProgressText').textContent = t('gemini_key_ratelimit_notice');
+            pauseAutoReview();
+            openGeminiKeyModal(function () {
+                resumeAutoReview();
+            }, true);
             return;
+        }
+        if (data.rate_limit_rotated) {
+            showToast(t('gemini_key_rotated_notice'));
         }
         if (data.stats) {
             document.getElementById('autoReviewStats').textContent = t('auto_ai_stats', data.stats);
@@ -512,6 +582,67 @@ function bindUi() {
             if (data.success) setTimeout(function () { window.location.reload(); }, 600);
         });
     });
+
+    const formKeyModal = document.getElementById('formGeminiKeyModal');
+    if (formKeyModal) {
+        formKeyModal.addEventListener('submit', function (e) {
+            e.preventDefault();
+            const input = document.getElementById('modal_gemini_api_keys');
+            const val = input ? input.value.trim() : '';
+            const validKeys = val.split(/[\r\n,]+/).map(function (s) { return s.trim(); }).filter(Boolean);
+            if (validKeys.length === 0) {
+                alert(t('gemini_key_required_prompt'));
+                return;
+            }
+            const saveBtn = document.getElementById('btnSaveGeminiKeyModal');
+            if (saveBtn) saveBtn.disabled = true;
+
+            const postData = {
+                do_action: 'save_settings',
+                gemini_api_keys: val,
+            };
+            if (isKeyModalRateLimit) {
+                postData.append_gemini_keys = '1';
+            }
+
+            postForm(postData).then(function (data) {
+                if (saveBtn) saveBtn.disabled = false;
+                if (data.success) {
+                    if (window.ZS_BOOT) {
+                        window.ZS_BOOT.has_ai = true;
+                    }
+                    const askBtn = document.getElementById('modalAskAiBtn');
+                    if (askBtn) askBtn.disabled = false;
+                    const autoBtn = document.getElementById('btnStartAuto');
+                    if (autoBtn) autoBtn.disabled = false;
+
+                    const cb = pendingAiCallback;
+                    closeGeminiKeyModal();
+                    showToast(data.message || t('settings_saved'));
+                    if (typeof cb === 'function') {
+                        cb();
+                    }
+                } else {
+                    alert(data.message || t('err_ai_failed'));
+                }
+            }).catch(function () {
+                if (saveBtn) saveBtn.disabled = false;
+            });
+        });
+    }
+
+    const cancelKeyModal = document.getElementById('btnCancelGeminiKeyModal');
+    if (cancelKeyModal) cancelKeyModal.addEventListener('click', closeGeminiKeyModal);
+
+    const closeKeyModalBtn = document.getElementById('btnCloseGeminiKeyModal');
+    if (closeKeyModalBtn) closeKeyModalBtn.addEventListener('click', closeGeminiKeyModal);
+
+    const keyModalOverlay = document.getElementById('geminiKeyModal');
+    if (keyModalOverlay) {
+        keyModalOverlay.addEventListener('click', function (e) {
+            if (e.target.id === 'geminiKeyModal') closeGeminiKeyModal();
+        });
+    }
     const testG = document.getElementById('btnTestGemini');
     if (testG) testG.addEventListener('click', function () {
         postForm({ do_action: 'test_gemini' }).then(function (data) { showToast(data.message || JSON.stringify(data)); });
@@ -625,9 +756,10 @@ function trapFocus(modalEl, e) {
 }
 
 document.addEventListener('keydown', function (e) {
-    const activeModal = document.querySelector('.modal-overlay.active');
-    if (activeModal && e.key === 'Tab') {
-        trapFocus(activeModal, e);
+    const activeModals = document.querySelectorAll('.modal-overlay.active');
+    const topModal = activeModals.length > 0 ? activeModals[activeModals.length - 1] : null;
+    if (topModal && e.key === 'Tab') {
+        trapFocus(topModal, e);
         return;
     }
     const tag = (e.target.tagName || '').toLowerCase();
@@ -635,14 +767,20 @@ document.addEventListener('keydown', function (e) {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     const key = e.key.toLowerCase();
     if (key === 'escape') {
-        closeViewModal();
-        const sm = document.getElementById('settingsModal');
-        const am = document.getElementById('autoReviewModal');
-        if (sm) sm.classList.remove('active');
-        if (am) am.classList.remove('active');
+        if (topModal) {
+            if (topModal.id === 'geminiKeyModal') {
+                closeGeminiKeyModal();
+            } else if (topModal.id === 'fileViewerModal') {
+                closeViewModal();
+            } else {
+                topModal.classList.remove('active');
+            }
+            return;
+        }
         return;
     }
-    if (!isModalActive || decisionsLocked) return;
+    const fvm = document.getElementById('fileViewerModal');
+    if (!fvm || !fvm.classList.contains('active') || topModal !== fvm || decisionsLocked) return;
     if (e.code === 'Space') {
         e.preventDefault();
         nextReviewFile();

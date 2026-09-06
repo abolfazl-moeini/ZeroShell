@@ -175,6 +175,7 @@ class ZS_Gemini {
         $url = 'https://generativelanguage.googleapis.com/v1beta/models/' . rawurlencode($model) . ':generateContent';
         $attempts = 0;
         $maxAttempts = count($keys);
+        $rateLimitHit = false;
 
         $dataDir = ($store && method_exists($store, 'getDataDir')) ? $store->getDataDir() : (isset($config['data_dir']) ? $config['data_dir'] : null);
 
@@ -205,6 +206,7 @@ class ZS_Gemini {
             $retryAfter = isset($response['retry_after']) ? intval($response['retry_after']) : 0;
 
             if ($statusCode === 429 || ($statusCode === 403 && (stripos($body, 'quota') !== false || stripos($body, 'RESOURCE_EXHAUSTED') !== false))) {
+                $rateLimitHit = true;
                 $wait = $retryAfter > 0 ? $retryAfter : 60;
                 ZS_Config::markKeyCooldown($apiKey, $wait, $config, $dataDir);
                 if ($store && method_exists($store, 'recordKeyCooldown')) {
@@ -226,6 +228,7 @@ class ZS_Gemini {
                     $record['raw_sha256'] = $rawHash;
                     $record['coverage'] = $built['coverage'];
                     $record['redaction_version'] = ZS_Config::REDACTION_VERSION;
+                    $record['rate_limit_rotated'] = $rateLimitHit;
                     $store->setAiCache($cacheKey, $record);
                     $record['cache_hit'] = false;
                     return $record;

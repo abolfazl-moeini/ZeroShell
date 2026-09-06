@@ -142,6 +142,7 @@ tr.active-review-row { outline: 2px solid #38bdf8 !important; background: rgba(5
     box-sizing: border-box;
 }
 .modal-overlay.active { display: flex; }
+#geminiKeyModal.modal-overlay { z-index: 15000; }
 .modal-content {
     background: #1e293b;
     border: 1px solid #475569;

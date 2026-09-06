@@ -767,6 +767,24 @@ class ZS_Config {
         return false;
     }
 
+    public static function clearKeyCooldown($key, &$config = null, $dataDir = null) {
+        unset(self::$keyCooldowns[$key]);
+        $fp = substr(hash('sha256', $key), 0, 16);
+        if (is_array($config) && isset($config['key_cooldowns'][$fp])) {
+            unset($config['key_cooldowns'][$fp]);
+        }
+        if ($dataDir === null) {
+            $dataDir = (is_array($config) && !empty($config['data_dir'])) ? $config['data_dir'] : self::getDataDir();
+        }
+        if ($dataDir !== null) {
+            $persisted = self::loadCooldowns($dataDir);
+            if (isset($persisted[$fp])) {
+                unset($persisted[$fp]);
+                self::saveCooldowns($persisted, $dataDir);
+            }
+        }
+    }
+
     public static function rotateGeminiKey(&$config, $dataDir = null) {
         $keys = self::getGeminiKeys($config);
         if (empty($keys)) {
