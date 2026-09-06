@@ -3,6 +3,7 @@ class ZS_Config {
     const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash';
     const REDACTION_VERSION = 'redact_v2';
     const PROMPT_VERSION = 'prompt_v2';
+    const DEFAULT_GITHUB_REPO = 'abolfazl-moeini/ZeroShell';
     const MAX_SCAN_BYTES = 2097152;
     const JSON_SAFE = 315; // JSON_HEX_TAG|HEX_AMP|HEX_APOS|HEX_QUOT (15) + UNESCAPED_UNICODE (256) + INVALID_UTF8_SUBSTITUTE (1048576) applied at runtime
 
@@ -546,6 +547,16 @@ class ZS_Config {
         return '';
     }
 
+    public static function getGithubRepo($config = array()) {
+        if (is_array($config) && !empty($config['github_repo'])) {
+            $repo = trim((string)$config['github_repo']);
+            if ($repo !== '' && strpos($repo, 'OWNER/REPO') === false) {
+                return $repo;
+            }
+        }
+        return self::DEFAULT_GITHUB_REPO;
+    }
+
     public static function defaultConfig() {
         return array(
             'key_hash'          => '',
@@ -555,7 +566,7 @@ class ZS_Config {
             'ai_prompt_version' => self::PROMPT_VERSION,
             'csrf_secret'       => '',
             'report_endpoint'   => '',
-            'github_repo'       => '',
+            'github_repo'       => self::DEFAULT_GITHUB_REPO,
             'rules_sync_url'    => '',
             'created_at'        => 0,
         );

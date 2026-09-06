@@ -786,7 +786,9 @@ class ZS_Http {
             $updates['gemini_model'] = trim($_POST['gemini_model']);
         }
         if (isset($_POST['github_repo'])) {
-            $updates['github_repo'] = trim($_POST['github_repo']);
+            $rawRepo = trim($_POST['github_repo']);
+            $normRepo = ZS_Share::normalizeGithubRepo($rawRepo);
+            $updates['github_repo'] = ($normRepo !== '') ? $normRepo : $rawRepo;
         }
         if (isset($_POST['report_endpoint'])) {
             $updates['report_endpoint'] = trim($_POST['report_endpoint']);
@@ -1061,7 +1063,7 @@ class ZS_Http {
             self::jsonOk($res);
         }
 
-        $githubRepo = !empty($config['github_repo']) ? $config['github_repo'] : '';
+        $githubRepo = ZS_Config::getGithubRepo($config);
         $shareData = ZS_Share::getGithubShareData($bundle, $githubRepo);
         self::jsonOk(array(
             'bundle'         => $bundle,

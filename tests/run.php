@@ -4480,6 +4480,310 @@ run_test('Stale Session Isolation: reset scan rejects mutation from stale in-fli
     @rmdir($tempDir);
 });
 
+// -------------------------------------------------------------
+// GitHub Issue Sharing & Default Repository Tests
+// -------------------------------------------------------------
+run_test('GitHub Share: ZS_Config default repo and getGithubRepo helper', function () {
+    assert_equals('abolfazl-moeini/ZeroShell', ZS_Config::DEFAULT_GITHUB_REPO);
+
+    $def = ZS_Config::defaultConfig();
+    assert_equals('abolfazl-moeini/ZeroShell', $def['github_repo']);
+
+    assert_equals('abolfazl-moeini/ZeroShell', ZS_Config::getGithubRepo(array()));
+    assert_equals('abolfazl-moeini/ZeroShell', ZS_Config::getGithubRepo(array('github_repo' => '')));
+    assert_equals('abolfazl-moeini/ZeroShell', ZS_Config::getGithubRepo(array('github_repo' => '   ')));
+    assert_equals('abolfazl-moeini/ZeroShell', ZS_Config::getGithubRepo(array('github_repo' => 'OWNER/REPO')));
+    assert_equals('custom-org/custom-repo', ZS_Config::getGithubRepo(array('github_repo' => 'custom-org/custom-repo')));
+});
+
+run_test('GitHub Share: ZS_Share::normalizeGithubRepo handles various URL formats', function () {
+    assert_equals('abolfazl-moeini/ZeroShell', ZS_Share::normalizeGithubRepo('abolfazl-moeini/ZeroShell'));
+    assert_equals('abolfazl-moeini/ZeroShell', ZS_Share::normalizeGithubRepo('https://github.com/abolfazl-moeini/ZeroShell'));
+    assert_equals('abolfazl-moeini/ZeroShell', ZS_Share::normalizeGithubRepo('https://github.com/abolfazl-moeini/ZeroShell/'));
+    assert_equals('abolfazl-moeini/ZeroShell', ZS_Share::normalizeGithubRepo('https://github.com/abolfazl-moeini/ZeroShell.git'));
+    assert_equals('abolfazl-moeini/ZeroShell', ZS_Share::normalizeGithubRepo('https://github.com/abolfazl-moeini/ZeroShell/issues/new'));
+    assert_equals('abolfazl-moeini/ZeroShell', ZS_Share::normalizeGithubRepo('http://www.github.com/abolfazl-moeini/ZeroShell'));
+    assert_equals('abolfazl-moeini/ZeroShell', ZS_Share::normalizeGithubRepo('github.com/abolfazl-moeini/ZeroShell'));
+    assert_equals('', ZS_Share::normalizeGithubRepo(''));
+});
+
+run_test('GitHub Share: ZS_Share::getGithubShareData generates correct issue URL and defaults', function () {
+    $bundle = array(
+        'tool' => 'ZeroShell Malware Cleaner',
+        'total_items' => 1,
+        'items' => array(
+            array(
+                'finding_id' => 'f1',
+                'rel_path' => 'wp-content/shell.php',
+                'rule_ids' => array('SIG-001'),
+                'status' => 'FOUND',
+                'raw_sha256' => 'abc123hash',
+            ),
+        ),
+    );
+
+    // 1. Default when empty repo
+    $share1 = ZS_Share::getGithubShareData($bundle, '');
+    assert_true(strpos($share1['url'], 'https://github.com/abolfazl-moeini/ZeroShell/issues/new') === 0, 'Must default to abolfazl-moeini/ZeroShell');
+    assert_true(strpos($share1['url'], 'title=') !== false, 'URL must include title');
+    assert_true(strpos($share1['url'], 'body=') !== false, 'Short bundle must include body');
+    assert_false($share1['need_clipboard'], 'Short bundle does not need clipboard');
+
+    // 2. Default when placeholder OWNER/REPO
+    $share2 = ZS_Share::getGithubShareData($bundle, 'OWNER/REPO');
+    assert_true(strpos($share2['url'], 'https://github.com/abolfazl-moeini/ZeroShell/issues/new') === 0, 'Placeholder must resolve to default repo');
+
+    // 3. Full URL input
+    $share3 = ZS_Share::getGithubShareData($bundle, 'https://github.com/abolfazl-moeini/ZeroShell');
+    assert_true(strpos($share3['url'], 'https://github.com/abolfazl-moeini/ZeroShell/issues/new') === 0, 'Full URL must be normalized cleanly');
+
+    // 4. Custom repo
+    $share4 = ZS_Share::getGithubShareData($bundle, 'custom-team/custom-repo');
+    assert_true(strpos($share4['url'], 'https://github.com/custom-team/custom-repo/issues/new') === 0, 'Custom repo must be honored');
+
+    // 5. Large bundle (> 1500 chars) requires clipboard
+    $largeBundle = array(
+        'tool' => 'ZeroShell Malware Cleaner',
+        'total_items' => 30,
+        'items' => array(),
+    );
+    for ($i = 0; $i < 30; $i++) {
+        $largeBundle['items'][] = array(
+            'finding_id' => 'f' . $i,
+            'rel_path' => 'wp-content/plugins/very-long-directory-path-to-simulate-large-url/subfolder/file' . $i . '.php',
+            'rule_ids' => array('SIG-001', 'SIG-002', 'SIG-003'),
+            'status' => 'FOUND',
+            'raw_sha256' => hash('sha256', 'large-item-' . $i),
+        );
+    }
+    $shareLarge = ZS_Share::getGithubShareData($largeBundle);
+    assert_true($shareLarge['need_clipboard'], 'Large payload must set need_clipboard to true');
+    assert_true(strpos($shareLarge['url'], 'body=') === false, 'Large payload must omit body from query string');
+    assert_true(strpos($shareLarge['url'], 'https://github.com/abolfazl-moeini/ZeroShell/issues/new?title=') === 0, 'Large payload must still point to new issue URL');
+});
+
+run_test('GitHub Share: HTTP action share_bundle returns default github_url and body', function () use ($repoRoot) {
+    $tempDir = sys_get_temp_dir() . '/zs_share_http_' . bin2hex(random_bytes(4));
+    @mkdir($tempDir, 0755, true);
+    $store = new ZS_Store($tempDir);
+    $session = $store->initSession($tempDir, true);
+    $session['infected_files'] = array(
+        array('finding_id' => 'share1', 'path' => $tempDir . '/test.php', 'status' => 'FOUND', 'raw_sha256' => 'abc', 'reason' => 'test'),
+    );
+    $store->saveSession($session);
+
+    $csrfSecret = "csrf_test_secret_1234567890123456";
+    $keyHash = password_hash("AdminPass1234", PASSWORD_DEFAULT);
+    $config = array(
+        "key_hash"    => $keyHash,
+        "csrf_secret" => $csrfSecret,
+    );
+    ZS_Config::saveConfig($config, $tempDir);
+
+    $scriptPath = $tempDir . '/test_share_bundle.php';
+    file_put_contents($scriptPath, '<?php
+    define("ZS_INTERNAL", true);
+    require_once ' . var_export($repoRoot . '/src/Hash.php', true) . ';
+    require_once ' . var_export($repoRoot . '/src/Config.php', true) . ';
+    require_once ' . var_export($repoRoot . '/src/I18n.php', true) . ';
+    require_once ' . var_export($repoRoot . '/src/Rules.php', true) . ';
+    require_once ' . var_export($repoRoot . '/src/Store.php', true) . ';
+    require_once ' . var_export($repoRoot . '/src/Quarantine.php', true) . ';
+    require_once ' . var_export($repoRoot . '/src/Engine.php', true) . ';
+    require_once ' . var_export($repoRoot . '/src/Gemini.php', true) . ';
+    require_once ' . var_export($repoRoot . '/src/Share.php', true) . ';
+    require_once ' . var_export($repoRoot . '/src/Http.php', true) . ';
+    require_once ' . var_export($repoRoot . '/src/Ui.php', true) . ';
+
+    $dir = $argv[1];
+    $store = new ZS_Store($dir);
+    $config = ZS_Config::loadConfig($dir);
+
+    $authExpiry = time() + 3600;
+    $sessionCookie = hash_hmac("sha256", "zs_auth:" . $authExpiry . ":" . $config["key_hash"], $config["csrf_secret"]) . ":" . $authExpiry;
+    $_COOKIE["zs_session"] = $sessionCookie;
+    $csrfExpiry = time() + 3600;
+    $csrfToken = hash_hmac("sha256", "zs_csrf:" . $csrfExpiry . ":" . $sessionCookie, $config["csrf_secret"]) . ":" . $csrfExpiry;
+    $_COOKIE["zs_csrf"] = $csrfToken;
+
+    $_SERVER["REQUEST_METHOD"] = "POST";
+    $_SERVER["REQUEST_URI"] = "/malware-cleaner.php";
+    $_SERVER["HTTP_X_CSRF_TOKEN"] = $csrfToken;
+    $_SERVER["HTTP_ACCEPT"] = "application/json";
+    $_POST = array(
+        "do_action" => "share_bundle",
+        "finding_ids" => "share1",
+    );
+    ZS_Http::handleRequest($dir, $dir);
+    ');
+
+    $phpBin = PHP_BINARY;
+    $cmd = escapeshellcmd($phpBin) . ' ' . escapeshellarg($scriptPath) . ' ' . escapeshellarg($tempDir);
+    $out = array();
+    $code = 0;
+    exec($cmd, $out, $code);
+
+    $raw = implode("\n", $out);
+    $json = json_decode($raw, true);
+    assert_true(is_array($json), 'Output must be JSON: ' . $raw);
+    assert_true(isset($json['github_url']), 'github_url must be present');
+    assert_true(strpos($json['github_url'], 'https://github.com/abolfazl-moeini/ZeroShell/issues/new') === 0, 'github_url must target default repo: ' . $json['github_url']);
+    assert_true(!empty($json['markdown_body']), 'markdown_body must be present');
+
+    @unlink($scriptPath);
+    @unlink($store->getSessionFile());
+    @unlink($store->getKnowledgeFile());
+    @unlink(ZS_Config::getConfigFile($tempDir));
+    @rmdir($tempDir);
+});
+
+run_test('GitHub Share: client app.js opens new issue in new tab with noopener,noreferrer', function () use ($repoRoot) {
+    $jsPath = $repoRoot . '/src/assets/app.js';
+    assert_true(file_exists($jsPath), 'app.js must exist');
+
+    $nodeBin = trim((string)shell_exec('command -v node'));
+    if ($nodeBin === '') {
+        return;
+    }
+
+    $nodeScript = <<<'NODE_SCRIPT'
+const fs = require('fs');
+const vm = require('vm');
+
+const appJs = process.argv[2];
+const code = fs.readFileSync(appJs, 'utf8');
+
+const elements = {};
+function getEl(id) {
+    if (!elements[id]) {
+        elements[id] = {
+            id,
+            style: {},
+            className: '',
+            classList: {
+                classes: [],
+                add: function(c) { if (!this.contains(c)) this.classes.push(c); },
+                remove: function(c) { this.classes = this.classes.filter(x => x !== c); },
+                contains: function(c) { return this.classes.includes(c); }
+            },
+            textContent: '',
+            disabled: false,
+            setAttribute: () => {},
+            removeAttribute: () => {},
+            getAttribute: () => null,
+            querySelector: () => null,
+            querySelectorAll: () => [],
+            addEventListener: function(event, handler) { this.handlers = this.handlers || {}; this.handlers[event] = handler; },
+            click: function() { if (this.handlers && this.handlers['click']) this.handlers['click'](); }
+        };
+    }
+    return elements[id];
+}
+
+let openedWindows = [];
+let copiedText = '';
+
+const sandbox = {
+    window: {
+        location: { pathname: '/malware-cleaner.php', reload: () => {} },
+        open: (url, target, features) => {
+            openedWindows.push({ url, target, features });
+            return null;
+        },
+        ZS_BOOT: {
+            csrf: 'mock-csrf',
+            session_id: 'mock-sid',
+            github_repo: 'abolfazl-moeini/ZeroShell',
+            i18n: { share_toast_copied: 'Copied!', modal_copied: 'Copied!' },
+            items: []
+        },
+        navigator: {
+            clipboard: {
+                writeText: (txt) => { copiedText = txt; return Promise.resolve(); }
+            }
+        },
+        isSecureContext: true
+    },
+    document: {
+        addEventListener: (event, handler) => {
+            if (event === 'DOMContentLoaded') handler();
+        },
+        getElementById: (id) => getEl(id),
+        querySelector: () => null,
+        querySelectorAll: () => [],
+        body: { appendChild: () => {}, removeChild: () => {} },
+        createElement: (tag) => ({ tag, style: {}, click: () => {} })
+    },
+    fetch: (url, opts) => {
+        return Promise.resolve({
+            json: () => Promise.resolve({
+                success: true,
+                github_url: 'https://github.com/abolfazl-moeini/ZeroShell/issues/new?title=test',
+                markdown_body: '### Report Body',
+                need_clipboard: false,
+                bundle: { total_items: 1 }
+            })
+        });
+    },
+    setTimeout: (fn) => setTimeout(fn, 10),
+    clearTimeout: clearTimeout,
+    console: console,
+    FormData: class { append(k, v) { this[k] = v; } }
+};
+sandbox.window.window = sandbox.window;
+sandbox.window.document = sandbox.document;
+sandbox.window.fetch = sandbox.fetch;
+sandbox.window.setTimeout = sandbox.setTimeout;
+sandbox.window.FormData = sandbox.FormData;
+
+const ctx = vm.createContext(sandbox);
+vm.runInContext(code, ctx);
+
+// Simulate clicking btnShareGithub
+const gBtn = getEl('btnShareGithub');
+if (!gBtn.handlers || !gBtn.handlers['click']) {
+    throw new Error('btnShareGithub click handler not registered');
+}
+
+gBtn.click();
+
+setTimeout(() => {
+    if (openedWindows.length !== 1) {
+        console.error('Expected 1 window.open call, got ' + openedWindows.length);
+        process.exit(1);
+    }
+    const win = openedWindows[0];
+    if (win.url !== 'https://github.com/abolfazl-moeini/ZeroShell/issues/new?title=test') {
+        console.error('Unexpected URL: ' + win.url);
+        process.exit(1);
+    }
+    if (win.target !== '_blank') {
+        console.error('Expected target _blank, got: ' + win.target);
+        process.exit(1);
+    }
+    if (win.features !== 'noopener,noreferrer') {
+        console.error('Expected features noopener,noreferrer, got: ' + win.features);
+        process.exit(1);
+    }
+    if (!copiedText.includes('### Report Body')) {
+        console.error('Expected copiedText to include report body, got: ' + copiedText);
+        process.exit(1);
+    }
+    console.log('NODE_OK');
+}, 50);
+NODE_SCRIPT;
+
+    $tmpScript = sys_get_temp_dir() . '/zs_node_share_test_' . bin2hex(random_bytes(4)) . '.js';
+    file_put_contents($tmpScript, $nodeScript);
+    $out = array();
+    $code = 0;
+    exec(escapeshellcmd($nodeBin) . ' ' . escapeshellarg($tmpScript) . ' ' . escapeshellarg($jsPath), $out, $code);
+    @unlink($tmpScript);
+
+    assert_equals(0, $code, 'Node script failed: ' . implode("\n", $out));
+    assert_true(in_array('NODE_OK', $out), 'Node script did not output NODE_OK');
+});
+
 if ($prevEnvKey !== false) {
     putenv('GEMINI_API_KEY=' . $prevEnvKey);
     $_ENV['GEMINI_API_KEY'] = $prevEnvKey;

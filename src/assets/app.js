@@ -1785,23 +1785,42 @@ function bindUi() {
         });
     });
 
-    function showShare(data) {
+    function showShare(data, openGithub) {
         const pre = document.getElementById('sharePreview');
-        pre.style.display = 'block';
-        if (data.receipt) {
-            pre.textContent = 'Server Receipt:\n' + data.receipt + '\n\nPayload:\n' + JSON.stringify(data.preview || data.bundle, null, 2);
-        } else {
-            pre.textContent = data.markdown_body || JSON.stringify(data.preview || data.bundle, null, 2);
+        if (pre) {
+            pre.style.display = 'block';
+            if (data.receipt) {
+                pre.textContent = 'Server Receipt:\n' + data.receipt + '\n\nPayload:\n' + JSON.stringify(data.preview || data.bundle, null, 2);
+            } else {
+                pre.textContent = data.markdown_body || JSON.stringify(data.preview || data.bundle, null, 2);
+            }
         }
-        if (data.github_url) window.open(data.github_url, '_blank');
+        if (openGithub !== false && data.github_url) {
+            window.open(data.github_url, '_blank', 'noopener,noreferrer');
+        }
     }
     const gBtn = document.getElementById('btnShareGithub');
-    if (gBtn) gBtn.addEventListener('click', function () { shareAction({}).then(showShare); });
+    if (gBtn) gBtn.addEventListener('click', function () {
+        shareAction({}).then(function (data) {
+            showShare(data, true);
+            const textToCopy = data.markdown_body || (data.bundle ? JSON.stringify(data.bundle, null, 2) : '');
+            if (textToCopy) {
+                copyTextToClipboard(textToCopy, t('share_toast_copied'));
+            } else {
+                showToast(t('share_toast_copied'));
+            }
+        });
+    });
     const cBtn = document.getElementById('btnShareCopy');
     if (cBtn) cBtn.addEventListener('click', function () {
         shareAction({}).then(function (data) {
-            showShare(data);
-            showToast(t('share_toast_copied'));
+            showShare(data, false);
+            const textToCopy = data.markdown_body || (data.bundle ? JSON.stringify(data.bundle, null, 2) : '');
+            if (textToCopy) {
+                copyTextToClipboard(textToCopy, t('modal_copied'));
+            } else {
+                showToast(t('modal_copied'));
+            }
         });
     });
     const jBtn = document.getElementById('btnShareJson');

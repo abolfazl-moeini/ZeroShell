@@ -121,17 +121,29 @@ class ZS_Share {
         return $md;
     }
 
+    public static function normalizeGithubRepo($repo) {
+        $repo = trim((string)$repo);
+        if ($repo === '') {
+            return '';
+        }
+        $repo = preg_replace('#^https?://(?:www\.)?github\.com/#i', '', $repo);
+        $repo = preg_replace('#^github\.com/#i', '', $repo);
+        $repo = preg_replace('#\.(?:git)$#i', '', $repo);
+        $repo = preg_replace('#/issues(?:/.*)?$#i', '', $repo);
+        return trim($repo, '/');
+    }
+
     public static function getGithubShareData($bundle, $githubRepo = '') {
-        $repo = trim((string)$githubRepo);
+        $rawRepo = trim((string)$githubRepo);
+        if ($rawRepo === '' || strpos($rawRepo, 'OWNER/REPO') !== false) {
+            $rawRepo = defined('ZS_Config::DEFAULT_GITHUB_REPO') ? ZS_Config::DEFAULT_GITHUB_REPO : 'abolfazl-moeini/ZeroShell';
+        }
+        $repo = self::normalizeGithubRepo($rawRepo);
+        if ($repo === '') {
+            $repo = 'abolfazl-moeini/ZeroShell';
+        }
         $title = 'Malware signature submission: ' . count($bundle['items']) . ' findings';
         $body = self::buildMarkdownReport($bundle, $repo);
-        if ($repo === '' || strpos($repo, 'OWNER/REPO') !== false) {
-            return array(
-                'url'            => '',
-                'body'           => $body,
-                'need_clipboard' => true,
-            );
-        }
         $baseUrl = 'https://github.com/' . $repo . '/issues/new';
         $fullUrl = $baseUrl . '?title=' . rawurlencode($title) . '&body=' . rawurlencode($body);
         if (strlen($fullUrl) < 1500) {

@@ -226,12 +226,14 @@ class ZS_Ui {
             $reviewCursor = $maxIdx;
         }
         $isCompleted = !empty($session['is_completed']);
+        $githubRepo = ZS_Config::getGithubRepo($config);
         $boot = array(
             'items' => $infectedJs,
             'csrf' => $csrfToken,
             'i18n' => ZS_I18n::getAll(),
             'session_id' => isset($session['scan_session_id']) ? $session['scan_session_id'] : '',
             'has_ai' => $hasGeminiKeys,
+            'github_repo' => $githubRepo,
             'job' => $autoJob,
             'stats' => $stats,
             'review_cursor' => $reviewCursor,
@@ -250,6 +252,7 @@ class ZS_Ui {
         window.ZS_I18N = window.ZS_BOOT.i18n || {};
         window.ZS_CSRF = window.ZS_BOOT.csrf || '';
         window.ZS_SESSION_ID = window.ZS_BOOT.session_id || '';
+        window.ZS_GITHUB_REPO = window.ZS_BOOT.github_repo || '';
     </script>
     <div class="card">
         <div class="header-row">
@@ -433,7 +436,7 @@ class ZS_Ui {
                     </div>
                     <div class="form-group">
                         <label><?php echo htmlspecialchars(ZS_I18n::t('settings_github_repo'), ENT_QUOTES, 'UTF-8'); ?></label>
-                        <input type="text" id="set_github_repo" class="form-input" value="<?php echo htmlspecialchars(isset($config['github_repo']) ? $config['github_repo'] : '', ENT_QUOTES, 'UTF-8'); ?>">
+                        <input type="text" id="set_github_repo" class="form-input" value="<?php echo htmlspecialchars(ZS_Config::getGithubRepo($config), ENT_QUOTES, 'UTF-8'); ?>" placeholder="<?php echo htmlspecialchars(ZS_Config::DEFAULT_GITHUB_REPO, ENT_QUOTES, 'UTF-8'); ?>">
                     </div>
                     <div class="form-group">
                         <label><?php echo htmlspecialchars(ZS_I18n::t('settings_sync_url'), ENT_QUOTES, 'UTF-8'); ?></label>
