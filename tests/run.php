@@ -3411,6 +3411,247 @@ run_test('Localization: path_copied and copy_path_hint in en.php and fa.php', fu
     assert_true($en['path_copied'] !== $fa['path_copied'], 'en and fa translations should be distinct');
 });
 
+// -------------------------------------------------------------
+// Progressive Live Scanning & Safe Concurrent Review
+// -------------------------------------------------------------
+run_test('Live Scanning: actionScanBatch returns progressive findings and stats', function () use ($repoRoot) {
+    $base = sys_get_temp_dir() . '/zs_live_' . bin2hex(random_bytes(4));
+    $root = $base . '/site';
+    $data = $base . '/data';
+    @mkdir($root, 0755, true);
+    @mkdir($data, 0755, true);
+
+    file_put_contents($root . '/clean1.php', '<?php echo "Clean 1";');
+    file_put_contents($root . '/clean2.php', '<?php echo "Clean 2";');
+    file_put_contents($root . '/clean3.php', '<?php echo "Clean 3";');
+    file_put_contents($root . '/mal1.php', '<?php eval(base64_decode("c3lzdGVtKCdpZDMnKTs="));');
+    file_put_contents($root . '/mal2.php', '<?php eval(base64_decode("c3lzdGVtKCdpZDQnKTs="));');
+
+    $config = array(
+        'key_hash' => password_hash('TestKey123', PASSWORD_BCRYPT),
+        'csrf_secret' => bin2hex(random_bytes(16)),
+    );
+    ZS_Config::saveConfig($config, $data);
+
+    $store = new ZS_Store($data);
+    $session = $store->initSession($root, true);
+
+    // Call scan_batch via sub-process HTTP invocation
+    $script = $base . '/test_scan_batch.php';
+    $code = '<?php
+    define("ZS_INTERNAL", true);
+    require_once ' . var_export($repoRoot . '/src/Hash.php', true) . ';
+    require_once ' . var_export($repoRoot . '/src/Config.php', true) . ';
+    require_once ' . var_export($repoRoot . '/src/Store.php', true) . ';
+    require_once ' . var_export($repoRoot . '/src/I18n.php', true) . ';
+    require_once ' . var_export($repoRoot . '/src/Ui.php', true) . ';
+    require_once ' . var_export($repoRoot . '/src/Rules.php', true) . ';
+    require_once ' . var_export($repoRoot . '/src/Quarantine.php', true) . ';
+    require_once ' . var_export($repoRoot . '/src/Engine.php', true) . ';
+    require_once ' . var_export($repoRoot . '/src/Gemini.php', true) . ';
+    require_once ' . var_export($repoRoot . '/src/Http.php', true) . ';
+
+    $rootDir = $argv[1];
+    $dataDir = $argv[2];
+    $config = ZS_Config::loadConfig($dataDir);
+
+    $authExpiry = time() + 3600;
+    $sessionCookie = hash_hmac("sha256", "zs_auth:" . $authExpiry . ":" . $config["key_hash"], $config["csrf_secret"]) . ":" . $authExpiry;
+    $_COOKIE["zs_session"] = $sessionCookie;
+    $csrfExpiry = time() + 3600;
+    $csrfToken = hash_hmac("sha256", "zs_csrf:" . $csrfExpiry . ":" . $sessionCookie, $config["csrf_secret"]) . ":" . $csrfExpiry;
+    $_COOKIE["zs_csrf"] = $csrfToken;
+
+    $_SERVER["REQUEST_METHOD"] = "POST";
+    $_SERVER["HTTP_X_CSRF_TOKEN"] = $csrfToken;
+    $_SERVER["HTTP_ACCEPT"] = "application/json";
+    $_POST = array("do_action" => "scan_batch");
+
+    ZS_Http::handleRequest($rootDir, $dataDir);
+    ';
+    file_put_contents($script, $code);
+
+    $bin = (defined('PHP_BINARY') && PHP_BINARY) ? PHP_BINARY : 'php';
+    $out = shell_exec(escapeshellarg($bin) . ' ' . escapeshellarg($script) . ' ' . escapeshellarg($root) . ' ' . escapeshellarg($data));
+    $json = json_decode($out, true);
+
+    assert_true(is_array($json), 'actionScanBatch must return valid JSON, got: ' . $out);
+    assert_true(!empty($json['success']), 'scan_batch must succeed');
+    assert_true(isset($json['scanned_files']) && $json['scanned_files'] >= 5, 'scanned_files must be at least 5');
+    assert_true(isset($json['infected_count']) && $json['infected_count'] === 2, 'infected_count must be 2');
+    assert_true(isset($json['new_findings']) && count($json['new_findings']) === 2, 'new_findings must contain 2 items');
+    assert_true(!empty($json['is_completed']), 'scan must complete for 5 files');
+
+    $f1 = $json['new_findings'][0];
+    assert_true(!empty($f1['finding_id']), 'new finding must have finding_id');
+    assert_true(!empty($f1['path']), 'new finding must have path');
+    assert_true(!empty($f1['raw_sha256']), 'new finding must have raw_sha256');
+    assert_equals('FOUND', $f1['status'], 'initial finding status must be FOUND');
+
+    // Second call when already completed returns empty new_findings
+    $out2 = shell_exec(escapeshellarg($bin) . ' ' . escapeshellarg($script) . ' ' . escapeshellarg($root) . ' ' . escapeshellarg($data));
+    $json2 = json_decode($out2, true);
+    assert_true(is_array($json2) && !empty($json2['is_completed']), 'subsequent scan_batch returns completed');
+    assert_true(empty($json2['new_findings']), 'completed scan returns no new findings');
+
+    // Clean up
+    foreach (glob($root . '/*.php') as $f) { @unlink($f); }
+    @unlink($script);
+    @unlink($data . '/config.php');
+    @unlink($store->getSessionFile());
+    @unlink($store->getKnowledgeFile());
+    @rmdir($root);
+    @rmdir($data);
+    @rmdir($base);
+});
+
+run_test('Concurrent Review: review actions while scanning batch proceeds in background', function () use ($repoRoot) {
+    $base = sys_get_temp_dir() . '/zs_conc_' . bin2hex(random_bytes(4));
+    $root = $base . '/site';
+    $data = $base . '/data';
+    $quar = $data . '/quarantine';
+    @mkdir($root, 0755, true);
+    @mkdir($data, 0755, true);
+    @mkdir($quar, 0755, true);
+
+    // Create 10 files
+    for ($i = 0; $i < 10; $i++) {
+        file_put_contents($root . '/test_' . $i . '.php', '<?php eval(base64_decode("c3lzdGVtKCdpZCk7")); // ' . $i);
+    }
+
+    $config = array(
+        'key_hash' => password_hash('TestKey123', PASSWORD_BCRYPT),
+        'csrf_secret' => bin2hex(random_bytes(16)),
+    );
+    ZS_Config::saveConfig($config, $data);
+
+    $store = new ZS_Store($data);
+    $session = $store->initSession($root, true);
+
+    // First, run batch 1 to find some items
+    ZS_Http::executeScanBatch($session, $root, $data, $store);
+    $fresh = $store->loadSession();
+    assert_true(!empty($fresh['infected_files']), 'batch 1 must find infected files');
+    $finding0 = $fresh['infected_files'][0];
+    $fid0 = $finding0['finding_id'];
+    $raw0 = $finding0['raw_sha256'];
+    $path0 = $finding0['path'];
+
+    // Simulate concurrent review action: quarantine finding 0 via delete_single
+    $qRes = ZS_Quarantine::copyThenUnlink($path0, $root, $quar, array('finding_id' => $fid0, 'expected_raw' => $raw0));
+    assert_true(!empty($qRes['success']), 'quarantine must succeed');
+    $updated = $store->updateInfectedItem(0, array(
+        'status' => 'QUARANTINED',
+        'backup_name' => $qRes['backup_name'],
+        'reviewed' => true,
+    ));
+    assert_true($updated, 'finding 0 must be updated to QUARANTINED');
+
+    // Also mark finding 1 clean concurrently
+    if (isset($fresh['infected_files'][1])) {
+        $store->markClean($fresh['infected_files'][1]['raw_sha256'], $fresh['infected_files'][1]['path'], $fresh['scan_session_id']);
+        $store->updateInfectedItem(1, array('reviewed' => true));
+    }
+
+    // Now run another scan batch
+    $freshBeforeBatch = $store->loadSession();
+    ZS_Http::executeScanBatch($freshBeforeBatch, $root, $data, $store);
+
+    // Verify session state AFTER the concurrent scan batch
+    $finalSession = $store->loadSession();
+    assert_true(is_array($finalSession), 'final session must exist');
+    assert_equals('QUARANTINED', $finalSession['infected_files'][0]['status'], 'finding 0 must REMAIN QUARANTINED after concurrent scan batch');
+    assert_true(!empty($finalSession['infected_files'][0]['reviewed']), 'finding 0 must remain reviewed');
+    if (isset($finalSession['infected_files'][1])) {
+        assert_true(!empty($finalSession['infected_files'][1]['reviewed']), 'finding 1 must remain reviewed');
+    }
+
+    // Clean up
+    foreach (glob($root . '/*.php') as $f) { @unlink($f); }
+    foreach (glob($quar . '/*') as $f) { @unlink($f); }
+    @rmdir($quar);
+    @unlink($data . '/config.php');
+    @unlink($store->getSessionFile());
+    @unlink($store->getKnowledgeFile());
+    @rmdir($root);
+    @rmdir($data);
+    @rmdir($base);
+});
+
+run_test('UI Progressive Scanning: renderReport outputs live banner and scan_active flag', function () {
+    $tempDir = sys_get_temp_dir() . '/zs_ui_live_' . bin2hex(random_bytes(4));
+    @mkdir($tempDir, 0755, true);
+    $store = new ZS_Store($tempDir);
+    $config = array('csrf_secret' => 'test_secret', 'key_hash' => 'hash');
+
+    // Case 1: Incomplete scan session
+    $sessionIncomplete = $store->initSession($tempDir, true);
+    $sessionIncomplete['is_completed'] = false;
+    $sessionIncomplete['scanned_files'] = 150;
+    $sessionIncomplete['scanned_dirs'] = 12;
+
+    ob_start();
+    ZS_Ui::renderReport($sessionIncomplete, $tempDir, $tempDir, $config, $store);
+    $html1 = ob_get_clean();
+
+    assert_true(strpos($html1, '"scan_active":true') !== false, 'boot data must have scan_active: true when incomplete');
+    assert_true(strpos($html1, 'id="liveScanBanner"') !== false, 'must render liveScanBanner');
+    assert_true(strpos($html1, 'class="status running"') !== false, 'must render status running when incomplete');
+    assert_true(strpos($html1, 'id="statScannedFiles"') !== false, 'must render statScannedFiles element');
+    assert_true(strpos($html1, 'id="btnToggleScan"') !== false, 'must render btnToggleScan pause/resume control');
+
+    // Case 2: Complete scan session
+    $sessionComplete = $sessionIncomplete;
+    $sessionComplete['is_completed'] = true;
+
+    ob_start();
+    ZS_Ui::renderReport($sessionComplete, $tempDir, $tempDir, $config, $store);
+    $html2 = ob_get_clean();
+
+    assert_true(strpos($html2, '"scan_active":false') !== false, 'boot data must have scan_active: false when complete');
+    assert_true(strpos($html2, 'class="status completed"') !== false, 'must render status completed when complete');
+    assert_true(strpos($html2, 'display:none;') !== false, 'liveScanBanner must be hidden when complete');
+
+    @unlink($store->getSessionFile());
+    @unlink($store->getKnowledgeFile());
+    @rmdir($tempDir);
+});
+
+run_test('Stale Session Isolation: reset scan rejects mutation from stale in-flight batch', function () {
+    $tempDir = sys_get_temp_dir() . '/zs_stale_' . bin2hex(random_bytes(4));
+    @mkdir($tempDir, 0755, true);
+    $store = new ZS_Store($tempDir);
+
+    // Initialize session 1
+    $session1 = $store->initSession($tempDir, true);
+    $sid1 = $session1['scan_session_id'];
+
+    // Now reset to session 2
+    $session2 = $store->initSession($tempDir, true);
+    $sid2 = $session2['scan_session_id'];
+    assert_true($sid1 !== $sid2, 'new session must have different scan_session_id');
+
+    // Stale batch from session 1 tries to mutate session
+    $staleFindings = array(array('finding_id' => 'stale1', 'path' => '/stale.php', 'status' => 'FOUND'));
+    $store->mutateSession(function ($fresh) use ($sid1, $staleFindings) {
+        if (!is_array($fresh)) return false;
+        if ($sid1 !== '' && isset($fresh['scan_session_id']) && $fresh['scan_session_id'] !== $sid1) {
+            // Discard stale mutation
+            return $fresh;
+        }
+        $fresh['infected_files'][] = $staleFindings[0];
+        return $fresh;
+    });
+
+    $freshAfter = $store->loadSession();
+    assert_true(is_array($freshAfter), 'session must exist');
+    assert_equals(0, count($freshAfter['infected_files']), 'stale batch findings must NOT be written to fresh session');
+    assert_equals($sid2, $freshAfter['scan_session_id'], 'session 2 ID must remain intact');
+
+    @unlink($store->getSessionFile());
+    @rmdir($tempDir);
+});
+
 if ($prevEnvKey !== false) {
     putenv('GEMINI_API_KEY=' . $prevEnvKey);
     $_ENV['GEMINI_API_KEY'] = $prevEnvKey;

@@ -189,6 +189,12 @@ return array(
     'toast_rules_updated_simple' => 'Rules successfully updated.',
     'auto_ai_stopped_errors' => 'Auto AI review stopped due to repeated network/server errors.',
     'auto_ai_auth_expired' => 'Authentication session expired. Please refresh and log in again.',
-    'all_items_reviewed' => 'All detected items have been reviewed.'
+    'all_items_reviewed' => 'All detected items have been reviewed.',
+    'scan_live_scanning' => 'Scanning site in progress... Findings appear below in real time.',
+    'scan_live_completed' => 'Scan completed successfully.',
+    'scan_live_paused' => 'Scanning paused.',
+    'scan_btn_pause' => 'Pause Scan',
+    'scan_btn_resume' => 'Resume Scan',
+    'err_scan_failed' => 'Scan encountered an error and stopped.'
 );
 

@@ -136,26 +136,25 @@ class ZS_Http {
             return;
         }
 
-        if (!empty($session['is_completed'])) {
-            ZS_Ui::renderReport($session, $rootDir, $dataDir, $config, $store);
-            return;
-        }
-
-        $store->withNamedLock('scan_batch', function () use (&$session, $rootDir, $dataDir, $store) {
-            $fresh = $store->loadSessionUnlocked();
+        if (!empty($_GET['nojs']) && empty($session['is_completed'])) {
+            $store->withNamedLock('scan_batch', function () use (&$session, $rootDir, $dataDir, $store) {
+                $fresh = $store->loadSessionUnlocked();
+                if (is_array($fresh)) {
+                    $session = $fresh;
+                }
+                if (!empty($session['is_completed'])) {
+                    return;
+                }
+                self::executeScanBatch($session, $rootDir, $dataDir, $store);
+            });
+            $fresh = $store->loadSession();
             if (is_array($fresh)) {
                 $session = $fresh;
             }
-            if (!empty($session['is_completed'])) {
-                return;
-            }
-            self::executeScanBatch($session, $rootDir, $dataDir, $store);
-        });
-
-        if (!empty($session['is_completed']) && php_sapi_name() !== 'cli') {
-            ZS_Ui::renderReport($session, $rootDir, $dataDir, $config, $store);
-            return;
         }
+
+        ZS_Ui::renderReport($session, $rootDir, $dataDir, $config, $store);
+        return;
     }
 
     private static function wantsJson() {
@@ -396,7 +395,7 @@ class ZS_Http {
             'delete_single', 'restore_file', 'mark_clean', 'revoke_trusted',
             'revoke_candidate', 'clear_ai_cache', 'ask_ai', 'auto_review_step',
             'auto_review_control', 'save_settings', 'share_bundle', 'test_gemini',
-            'reset_scan', 'sync_rules', 'set_review_cursor',
+            'reset_scan', 'sync_rules', 'set_review_cursor', 'scan_batch',
         );
         if (in_array($action, $mutating, true)) {
             if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
@@ -471,6 +470,9 @@ class ZS_Http {
                 break;
             case 'test_gemini':
                 self::jsonOk(ZS_Gemini::ping($config));
+                break;
+            case 'scan_batch':
+                self::actionScanBatch($rootDir, $dataDir, $config, $store);
                 break;
             default:
                 self::jsonFail(400, 'Unknown action.');
@@ -954,6 +956,92 @@ class ZS_Http {
         ));
     }
 
+    private static function actionScanBatch($rootDir, $dataDir, $config, $store) {
+        $session = $store->loadSession();
+        if (!is_array($session)) {
+            self::jsonFail(400, 'Session not found.');
+        }
+
+        if (!empty($session['is_completed'])) {
+            self::jsonOk(array(
+                'is_completed'     => true,
+                'scanned_files'    => isset($session['scanned_files']) ? intval($session['scanned_files']) : 0,
+                'scanned_dirs'     => isset($session['scanned_dirs']) ? intval($session['scanned_dirs']) : 0,
+                'infected_count'   => isset($session['infected_files']) && is_array($session['infected_files']) ? count($session['infected_files']) : 0,
+                'trusted_bypassed' => isset($session['trusted_bypassed']) ? intval($session['trusted_bypassed']) : 0,
+                'current_dir'      => isset($session['current_dir']) ? $session['current_dir'] : '',
+                'new_findings'     => array(),
+            ));
+        }
+
+        $beforeFindingCount = isset($session['infected_files']) && is_array($session['infected_files'])
+            ? count($session['infected_files']) : 0;
+
+        $store->withNamedLock('scan_batch', function () use (&$session, $rootDir, $dataDir, $store) {
+            $fresh = $store->loadSessionUnlocked();
+            if (is_array($fresh)) {
+                $session = $fresh;
+            }
+            if (!empty($session['is_completed'])) {
+                return;
+            }
+            self::executeScanBatch($session, $rootDir, $dataDir, $store);
+        });
+
+        $fresh = $store->loadSession();
+        if (is_array($fresh)) {
+            $session = $fresh;
+        }
+
+        $allInfected = isset($session['infected_files']) && is_array($session['infected_files'])
+            ? $session['infected_files'] : array();
+
+        $newFindings = array();
+        $knowledge = $store->loadKnowledge();
+        $candidates = (is_array($knowledge) && isset($knowledge['candidates'])) ? $knowledge['candidates'] : array();
+
+        for ($i = $beforeFindingCount; $i < count($allInfected); $i++) {
+            $f = $allInfected[$i];
+            $status = isset($f['status']) ? $f['status'] : 'FOUND';
+            if ($status === 'TRUSTED_HIDDEN' || $status === 'TRUSTED') {
+                continue;
+            }
+            $raw = isset($f['raw_sha256']) ? $f['raw_sha256'] : '';
+            $newFindings[] = array(
+                'idx'            => $i,
+                'finding_id'     => isset($f['finding_id']) ? $f['finding_id'] : '',
+                'scan_session_id'=> isset($session['scan_session_id']) ? $session['scan_session_id'] : '',
+                'path'           => $f['path'],
+                'filename'       => basename($f['path']),
+                'reason'         => $f['reason'],
+                'rule_ids'       => isset($f['rule_ids']) ? $f['rule_ids'] : array(),
+                'size'           => $f['size'],
+                'size_fmt'       => number_format($f['size']) . ' B',
+                'status'         => $status,
+                'raw_sha256'     => $raw,
+                'norm_sha256'    => isset($f['norm_sha256']) ? $f['norm_sha256'] : '',
+                'row_id'         => 'row_' . md5($f['path'] . $i),
+                'is_candidate'   => isset($candidates[$raw]),
+                'first_path'     => (isset($candidates[$raw]['first_path']) ? $candidates[$raw]['first_path'] : ''),
+                'ai_verdict'     => isset($f['ai_verdict']) ? $f['ai_verdict'] : null,
+                'coverage'       => isset($f['coverage']) ? $f['coverage'] : 'full',
+                'backup_name'    => isset($f['backup_name']) ? $f['backup_name'] : '',
+                'severity'       => isset($f['severity']) ? $f['severity'] : 'suspect',
+                'reviewed'       => !empty($f['reviewed']),
+            );
+        }
+
+        self::jsonOk(array(
+            'is_completed'     => !empty($session['is_completed']),
+            'scanned_files'    => isset($session['scanned_files']) ? intval($session['scanned_files']) : 0,
+            'scanned_dirs'     => isset($session['scanned_dirs']) ? intval($session['scanned_dirs']) : 0,
+            'infected_count'   => count($allInfected),
+            'trusted_bypassed' => isset($session['trusted_bypassed']) ? intval($session['trusted_bypassed']) : 0,
+            'current_dir'      => isset($session['current_dir']) ? $session['current_dir'] : '',
+            'new_findings'     => $newFindings,
+        ));
+    }
+
     public static function isScanExtension($filename) {
         $ext = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
         $ok = array('php', 'phtml', 'php3', 'php4', 'php5', 'php7', 'php8', 'phar', 'suspected', 'bak');
@@ -968,6 +1056,12 @@ class ZS_Http {
         $maxBatchSeconds = 5.0;
         $maxFilesPerBatch = 500;
         $filesInThisBatch = 0;
+        $dirsInThisBatch = 0;
+        $bypassedInThisBatch = 0;
+        $symlinksInThisBatch = 0;
+        $unreadableInThisBatch = 0;
+        $partialInThisBatch = 0;
+        $newFindingsThisBatch = array();
 
         $rules = ZS_Rules::load($rootDir, $dataDir);
         $quarantineDir = ZS_Config::getQuarantineDir($rootDir, $dataDir);
@@ -995,6 +1089,7 @@ class ZS_Http {
                 $nextDir = array_shift($session['dir_queue']);
                 if (@is_link($nextDir) || ZS_Config::pathHasSymlink($nextDir, $rootDir)) {
                     $session['skipped_symlink'] = isset($session['skipped_symlink']) ? $session['skipped_symlink'] + 1 : 1;
+                    $symlinksInThisBatch++;
                     continue;
                 }
                 $realDir = realpath($nextDir);
@@ -1010,9 +1105,11 @@ class ZS_Http {
                 $session['visited_dirs'][$realDir] = 1;
                 $session['current_dir'] = $realDir;
                 $session['scanned_dirs']++;
+                $dirsInThisBatch++;
                 $items = @scandir($realDir);
                 if ($items === false) {
                     $session['skipped_unreadable'] = isset($session['skipped_unreadable']) ? $session['skipped_unreadable'] + 1 : 1;
+                    $unreadableInThisBatch++;
                     continue;
                 }
                 $session['dir_cursor'] = array('dir' => $realDir, 'offset' => 0, 'names' => array_values($items));
@@ -1028,6 +1125,7 @@ class ZS_Http {
             $path = rtrim($currentDir, '/\\') . DIRECTORY_SEPARATOR . $item;
             if (@is_link($path)) {
                 $session['skipped_symlink'] = isset($session['skipped_symlink']) ? $session['skipped_symlink'] + 1 : 1;
+                $symlinksInThisBatch++;
                 continue;
             }
             if (is_dir($path)) {
@@ -1053,10 +1151,12 @@ class ZS_Http {
             $rawHash = ZS_Hash::rawFile($path);
             if ($rawHash === false) {
                 $session['skipped_unreadable'] = isset($session['skipped_unreadable']) ? $session['skipped_unreadable'] + 1 : 1;
+                $unreadableInThisBatch++;
                 continue;
             }
             if (isset($trusted[$rawHash])) {
                 $session['trusted_bypassed']++;
+                $bypassedInThisBatch++;
                 continue;
             }
 
@@ -1064,18 +1164,20 @@ class ZS_Http {
             $truncated = ($size !== false && $size > ZS_Config::MAX_SCAN_BYTES);
             if ($truncated) {
                 $session['coverage_partial'] = isset($session['coverage_partial']) ? $session['coverage_partial'] + 1 : 1;
+                $partialInThisBatch++;
                 $content = @file_get_contents($path, false, null, 0, ZS_Config::MAX_SCAN_BYTES);
             } else {
                 $content = @file_get_contents($path);
             }
             if ($content === false) {
                 $session['skipped_unreadable'] = isset($session['skipped_unreadable']) ? $session['skipped_unreadable'] + 1 : 1;
+                $unreadableInThisBatch++;
                 continue;
             }
             $normHash = ZS_Hash::normalized($content);
             $engineResult = ZS_Engine::scanFile($path, $item, $content, $normHash, $rules, $rootDir, $truncated);
             if ($engineResult['detected']) {
-                $session['infected_files'][] = array(
+                $findingItem = array(
                     'finding_id'     => bin2hex(random_bytes(8)),
                     'path'           => $path,
                     'reason'         => implode(' | ', $engineResult['reasons']),
@@ -1089,6 +1191,8 @@ class ZS_Http {
                     'coverage'       => $truncated ? 'partial' : 'full',
                     'scan_session_id'=> $session['scan_session_id'],
                 );
+                $session['infected_files'][] = $findingItem;
+                $newFindingsThisBatch[] = $findingItem;
             }
         }
 
@@ -1096,13 +1200,68 @@ class ZS_Http {
             $session['is_completed'] = true;
         }
 
-        $store->saveSession($session);
+        $batchSid = isset($session['scan_session_id']) ? $session['scan_session_id'] : '';
+        $cursor = $session['dir_cursor'];
+        $queue = $session['dir_queue'];
+        $visited = $session['visited_dirs'];
+        $currentDir = isset($session['current_dir']) ? $session['current_dir'] : '';
+        $isCompleted = !empty($session['is_completed']);
+        $newFindings = $newFindingsThisBatch;
+
+        $store->mutateSession(function ($fresh) use (
+            $batchSid, $newFindings, $filesInThisBatch, $dirsInThisBatch,
+            $bypassedInThisBatch, $symlinksInThisBatch, $unreadableInThisBatch, $partialInThisBatch,
+            $cursor, $queue, $visited, $currentDir, $isCompleted
+        ) {
+            if (!is_array($fresh)) {
+                return false;
+            }
+            if ($batchSid !== '' && isset($fresh['scan_session_id']) && $fresh['scan_session_id'] !== $batchSid) {
+                return $fresh;
+            }
+            $fresh['scanned_files'] = (isset($fresh['scanned_files']) ? intval($fresh['scanned_files']) : 0) + $filesInThisBatch;
+            $fresh['scanned_dirs'] = (isset($fresh['scanned_dirs']) ? intval($fresh['scanned_dirs']) : 0) + $dirsInThisBatch;
+            if ($bypassedInThisBatch > 0) {
+                $fresh['trusted_bypassed'] = (isset($fresh['trusted_bypassed']) ? intval($fresh['trusted_bypassed']) : 0) + $bypassedInThisBatch;
+            }
+            if ($symlinksInThisBatch > 0) {
+                $fresh['skipped_symlink'] = (isset($fresh['skipped_symlink']) ? intval($fresh['skipped_symlink']) : 0) + $symlinksInThisBatch;
+            }
+            if ($unreadableInThisBatch > 0) {
+                $fresh['skipped_unreadable'] = (isset($fresh['skipped_unreadable']) ? intval($fresh['skipped_unreadable']) : 0) + $unreadableInThisBatch;
+            }
+            if ($partialInThisBatch > 0) {
+                $fresh['coverage_partial'] = (isset($fresh['coverage_partial']) ? intval($fresh['coverage_partial']) : 0) + $partialInThisBatch;
+            }
+
+            $fresh['dir_cursor'] = $cursor;
+            $fresh['dir_queue'] = $queue;
+            $fresh['visited_dirs'] = $visited;
+            $fresh['current_dir'] = $currentDir;
+            if ($isCompleted) {
+                $fresh['is_completed'] = true;
+            }
+
+            if (!isset($fresh['infected_files']) || !is_array($fresh['infected_files'])) {
+                $fresh['infected_files'] = array();
+            }
+            foreach ($newFindings as $nf) {
+                $fresh['infected_files'][] = $nf;
+            }
+
+            return $fresh;
+        });
+
+        $fresh = $store->loadSession();
+        if (is_array($fresh)) {
+            $session = $fresh;
+        }
 
         if (defined('ZS_TEST_MODE') && ZS_TEST_MODE) {
             return;
         }
 
-        $cli = (php_sapi_name() === 'cli');
+        $cli = (php_sapi_name() === 'cli' && empty($_POST['do_action']) && empty($_GET['do_action']));
         if ($cli) {
             echo "Progress: " . intval($session['scanned_files']) . " files. Queue: " . count($session['dir_queue']) . " dirs. Infected: " . count($session['infected_files']) . "\n";
             global $argv;
@@ -1132,7 +1291,9 @@ class ZS_Http {
                 }
             }
         } else {
-            ZS_Ui::renderScanProgress($session, $rootDir);
+            if (!self::wantsJson() && empty($_POST['do_action']) && empty($_GET['do_action'])) {
+                ZS_Ui::renderScanProgress($session, $rootDir);
+            }
         }
     }
 }

@@ -894,6 +894,236 @@ function shareAction(extra) {
     return postForm(extra);
 }
 
+let scanActive = false;
+let scanPaused = false;
+let scanTimer = null;
+let scanConsecutiveErrors = 0;
+
+function clearScanTimer() {
+    if (scanTimer) {
+        clearTimeout(scanTimer);
+        scanTimer = null;
+    }
+}
+
+function appendFindingRow(f) {
+    const tbody = document.getElementById('infectedTableBody');
+    const table = document.getElementById('infectedTable');
+    const noThreats = document.getElementById('noThreatsMsg');
+    const btnReview = document.getElementById('btnStartReview');
+    const btnAuto = document.getElementById('btnStartAuto');
+
+    if (noThreats) noThreats.style.display = 'none';
+    if (table) table.style.display = '';
+    if (btnReview) btnReview.style.display = 'inline-block';
+    if (btnAuto) btnAuto.style.display = 'inline-block';
+
+    if (!tbody) return;
+    if (document.getElementById(f.row_id)) return;
+
+    const tr = document.createElement('tr');
+    tr.id = f.row_id;
+
+    // Checkbox cell
+    const tdCheck = document.createElement('td');
+    const chk = document.createElement('input');
+    chk.type = 'checkbox';
+    chk.className = 'share-select';
+    chk.setAttribute('data-finding-id', f.finding_id);
+    tdCheck.appendChild(chk);
+    tr.appendChild(tdCheck);
+
+    // Number cell
+    const tdNum = document.createElement('td');
+    tdNum.textContent = String(f.idx + 1);
+    tr.appendChild(tdNum);
+
+    // Path cell
+    const tdPath = document.createElement('td');
+    tdPath.className = 'dir-path';
+    tdPath.textContent = f.path;
+    tr.appendChild(tdPath);
+
+    // Reason cell
+    const tdReason = document.createElement('td');
+    tdReason.className = 'reason-cell';
+    let reasonText = f.reason;
+    if (f.ai_verdict && f.ai_verdict.verdict) {
+        reasonText += ' [AI: ' + f.ai_verdict.verdict + ' ' + Math.round((f.ai_verdict.confidence || 0) * 100) + '%]';
+    }
+    tdReason.textContent = reasonText;
+    tr.appendChild(tdReason);
+
+    // Actions cell
+    const tdActions = document.createElement('td');
+    tdActions.className = 'action-cell';
+
+    const btnView = document.createElement('button');
+    btnView.type = 'button';
+    btnView.className = 'btn-view-single';
+    btnView.setAttribute('data-finding-id', f.finding_id);
+    btnView.setAttribute('data-review-idx', String(f.idx));
+    btnView.textContent = t('btn_inspect');
+    tdActions.appendChild(btnView);
+
+    const textSpace = document.createTextNode(' ');
+    tdActions.appendChild(textSpace);
+
+    const btnDel = document.createElement('button');
+    btnDel.type = 'button';
+    btnDel.className = 'btn-del-single';
+    btnDel.setAttribute('data-finding-id', f.finding_id);
+    btnDel.setAttribute('data-raw', f.raw_sha256);
+    btnDel.textContent = t('btn_delete');
+    if (f.status === 'QUARANTINED' || f.status === 'AI_QUARANTINED') {
+        btnDel.disabled = true;
+    }
+    tdActions.appendChild(btnDel);
+
+    tr.appendChild(tdActions);
+    tbody.appendChild(tr);
+}
+
+function updateModalProgress() {
+    const items = window.REVIEW_ITEMS || [];
+    if (!isModalActive || !items.length) return;
+    const counterEl = document.getElementById('modalCounter');
+    if (counterEl) counterEl.textContent = (currentReviewIndex + 1) + ' / ' + items.length;
+    const progressFill = document.getElementById('reviewProgressFill');
+    if (progressFill) progressFill.style.width = Math.round(((currentReviewIndex + 1) / items.length) * 100) + '%';
+    const btnNextTop = document.getElementById('btnNextTop');
+    if (btnNextTop && !decisionsLocked) {
+        btnNextTop.disabled = (currentReviewIndex >= items.length - 1);
+    }
+}
+
+function updateScanUi(data) {
+    if (!data) return;
+
+    const elScanned = document.getElementById('statScannedFiles');
+    if (elScanned && typeof data.scanned_files === 'number') {
+        elScanned.textContent = Number(data.scanned_files).toLocaleString();
+    }
+    const elDirs = document.getElementById('statScannedDirs');
+    if (elDirs && typeof data.scanned_dirs === 'number') {
+        elDirs.textContent = Number(data.scanned_dirs).toLocaleString();
+    }
+    const elBypassed = document.getElementById('statTrustedBypassed');
+    if (elBypassed && typeof data.trusted_bypassed === 'number') {
+        elBypassed.textContent = Number(data.trusted_bypassed).toLocaleString();
+    }
+    const elDir = document.getElementById('liveScanDir');
+    if (elDir && data.current_dir) {
+        elDir.textContent = data.current_dir;
+    }
+
+    if (Array.isArray(data.new_findings) && data.new_findings.length > 0) {
+        data.new_findings.forEach(function (nf) {
+            const exists = (window.REVIEW_ITEMS || []).some(function (it) {
+                return it.finding_id === nf.finding_id;
+            });
+            if (!exists) {
+                nf.idx = (window.REVIEW_ITEMS || []).length;
+                window.REVIEW_ITEMS.push(nf);
+                appendFindingRow(nf);
+            }
+        });
+    }
+
+    const totalThreats = (window.REVIEW_ITEMS || []).filter(function (it) {
+        return it.status !== 'TRUSTED_HIDDEN' && it.status !== 'TRUSTED';
+    }).length;
+
+    const elInfected = document.getElementById('statInfectedFiles');
+    if (elInfected) elInfected.textContent = String(totalThreats);
+    const elHeaderCount = document.getElementById('headerInfectedCount');
+    if (elHeaderCount) elHeaderCount.textContent = String(totalThreats);
+
+    updateModalProgress();
+}
+
+function onScanCompleted(data) {
+    const badge = document.getElementById('scanStatusBadge');
+    if (badge) {
+        badge.className = 'status completed';
+        badge.textContent = t('status_completed');
+    }
+    const banner = document.getElementById('liveScanBanner');
+    if (banner) {
+        const spinner = banner.querySelector('.live-scan-spinner');
+        if (spinner) spinner.style.display = 'none';
+        const txt = document.getElementById('liveScanText');
+        if (txt) txt.textContent = t('scan_live_completed');
+        const toggleBtn = document.getElementById('btnToggleScan');
+        if (toggleBtn) toggleBtn.style.display = 'none';
+    }
+    const totalFiles = (data && typeof data.scanned_files === 'number') ? data.scanned_files : 0;
+    showToast(t('scan_live_completed') + ' (' + Number(totalFiles).toLocaleString() + ' ' + t('stat_scanned_files') + ')');
+}
+
+function runScanNextStep() {
+    if (!scanActive || scanPaused) return;
+    postForm({ do_action: 'scan_batch' }).then(function (data) {
+        if (data.code === 'AUTH') {
+            scanActive = false;
+            clearScanTimer();
+            alert(t('auto_ai_auth_expired'));
+            return;
+        }
+        if (!data.success) {
+            scanConsecutiveErrors++;
+            if (scanConsecutiveErrors >= 5) {
+                scanActive = false;
+                clearScanTimer();
+                showToast(t('err_scan_failed'));
+                return;
+            }
+            scanTimer = setTimeout(function () {
+                if (scanActive && !scanPaused) runScanNextStep();
+            }, 3000);
+            return;
+        }
+        scanConsecutiveErrors = 0;
+        updateScanUi(data);
+
+        if (data.is_completed) {
+            scanActive = false;
+            clearScanTimer();
+            onScanCompleted(data);
+            return;
+        }
+
+        scanTimer = setTimeout(function () {
+            if (scanActive && !scanPaused) runScanNextStep();
+        }, 100);
+    }).catch(function () {
+        scanConsecutiveErrors++;
+        if (scanConsecutiveErrors >= 5) {
+            scanActive = false;
+            clearScanTimer();
+            return;
+        }
+        scanTimer = setTimeout(function () {
+            if (scanActive && !scanPaused) runScanNextStep();
+        }, 3000);
+    });
+}
+
+function toggleScanPause() {
+    scanPaused = !scanPaused;
+    const btn = document.getElementById('btnToggleScan');
+    const txt = document.getElementById('liveScanText');
+    if (scanPaused) {
+        clearScanTimer();
+        if (btn) btn.textContent = t('scan_btn_resume');
+        if (txt) txt.textContent = t('scan_live_paused');
+    } else {
+        if (btn) btn.textContent = t('scan_btn_pause');
+        if (txt) txt.textContent = t('scan_live_scanning');
+        runScanNextStep();
+    }
+}
+
 function bindUi() {
     fillTableText();
     currentReviewIndex = calculateInitialReviewIndex();
@@ -911,27 +1141,55 @@ function bindUi() {
     if (startReview) startReview.addEventListener('click', function () { startReviewMode(); });
     const startAuto = document.getElementById('btnStartAuto');
     if (startAuto) startAuto.addEventListener('click', startAutoAiReview);
-    document.querySelectorAll('[data-review-idx]').forEach(function (btn) {
-        btn.addEventListener('click', function () {
-            const fid = btn.getAttribute('data-finding-id');
-            if (fid) {
-                startReviewMode(fid);
-            } else {
-                startReviewMode(parseInt(btn.getAttribute('data-review-idx'), 10));
+
+    const toggleScanBtn = document.getElementById('btnToggleScan');
+    if (toggleScanBtn) {
+        toggleScanBtn.addEventListener('click', toggleScanPause);
+    }
+    if (window.ZS_BOOT && window.ZS_BOOT.scan_active) {
+        scanActive = true;
+        scanPaused = false;
+        runScanNextStep();
+    }
+
+    const tableBody = document.getElementById('infectedTableBody');
+    if (tableBody) {
+        tableBody.addEventListener('click', function (e) {
+            const viewBtn = e.target.closest('.btn-view-single');
+            if (viewBtn) {
+                const fid = viewBtn.getAttribute('data-finding-id');
+                if (fid) {
+                    startReviewMode(fid);
+                } else {
+                    startReviewMode(parseInt(viewBtn.getAttribute('data-review-idx'), 10));
+                }
+                return;
+            }
+            const delBtn = e.target.closest('.btn-del-single');
+            if (delBtn) {
+                if (!confirm(t('confirm_delete'))) return;
+                const fid = delBtn.getAttribute('data-finding-id');
+                const raw = delBtn.getAttribute('data-raw');
+                postForm({ do_action: 'delete_single', finding_id: fid, scan_session_id: window.ZS_SESSION_ID, expected_raw: raw }).then(function (data) {
+                    showToast(data.message || '');
+                    if (data.success) {
+                        delBtn.disabled = true;
+                        const it = (window.REVIEW_ITEMS || []).find(function (f) { return f.finding_id === fid; });
+                        if (it) {
+                            it.status = 'QUARANTINED';
+                            it.reviewed = true;
+                        }
+                        const statQuar = document.getElementById('statQuarantined');
+                        if (statQuar) {
+                            const cur = parseInt(statQuar.textContent.replace(/,/g, ''), 10) || 0;
+                            statQuar.textContent = String(cur + 1);
+                        }
+                    }
+                });
+                return;
             }
         });
-    });
-    document.querySelectorAll('.btn-del-single[data-finding-id]').forEach(function (btn) {
-        btn.addEventListener('click', function () {
-            if (!confirm(t('confirm_delete'))) return;
-            const fid = btn.getAttribute('data-finding-id');
-            const raw = btn.getAttribute('data-raw');
-            postForm({ do_action: 'delete_single', finding_id: fid, scan_session_id: window.ZS_SESSION_ID, expected_raw: raw }).then(function (data) {
-                showToast(data.message || '');
-                if (data.success) window.location.reload();
-            });
-        });
-    });
+    }
     const closeModal = document.getElementById('btnCloseModal');
     if (closeModal) closeModal.addEventListener('click', closeViewModal);
     const overlay = document.getElementById('fileViewerModal');

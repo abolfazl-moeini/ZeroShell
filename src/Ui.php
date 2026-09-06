@@ -220,6 +220,7 @@ class ZS_Ui {
             $maskedKeys[] = ZS_Config::maskSecret($k);
         }
         $reviewCursor = $store->findFirstUnreviewedIndex($session);
+        $isCompleted = !empty($session['is_completed']);
         $boot = array(
             'items' => $infectedJs,
             'csrf' => $csrfToken,
@@ -229,6 +230,7 @@ class ZS_Ui {
             'job' => $autoJob,
             'stats' => $stats,
             'review_cursor' => $reviewCursor,
+            'scan_active' => !$isCompleted,
         );
         ?>
     <script>
@@ -257,13 +259,27 @@ class ZS_Ui {
                 </form>
             </div>
         </div>
-        <div class="status completed"><?php echo htmlspecialchars(ZS_I18n::t('status_completed'), ENT_QUOTES, 'UTF-8'); ?></div>
+        <div class="status <?php echo $isCompleted ? 'completed' : 'running'; ?>" id="scanStatusBadge">
+            <?php echo htmlspecialchars(ZS_I18n::t($isCompleted ? 'status_completed' : 'status_running'), ENT_QUOTES, 'UTF-8'); ?>
+        </div>
+        <div id="liveScanBanner" class="live-scan-banner" style="<?php echo $isCompleted ? 'display:none;' : ''; ?>">
+            <div class="live-scan-header">
+                <span class="live-scan-spinner"></span>
+                <span id="liveScanText"><?php echo htmlspecialchars(ZS_I18n::t('scan_live_scanning'), ENT_QUOTES, 'UTF-8'); ?></span>
+                <button type="button" class="btn btn-outline" id="btnToggleScan" style="font-size:11px;padding:4px 8px;margin-inline-start:auto;">
+                    <?php echo htmlspecialchars(ZS_I18n::t('scan_btn_pause'), ENT_QUOTES, 'UTF-8'); ?>
+                </button>
+            </div>
+            <div class="dir-path" id="liveScanDir" style="margin-top:6px;font-size:12px;color:#94a3b8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                <?php echo htmlspecialchars(isset($session['current_dir']) ? $session['current_dir'] : $rootDir, ENT_QUOTES, 'UTF-8'); ?>
+            </div>
+        </div>
         <p style="color:#94a3b8;font-size:12px;"><?php echo htmlspecialchars(ZS_I18n::t('scan_not_clean_claim'), ENT_QUOTES, 'UTF-8'); ?></p>
         <div class="stats">
-            <div class="stat-box"><div class="stat-num"><?php echo number_format(isset($session['scanned_files']) ? $session['scanned_files'] : 0); ?></div><div><?php echo htmlspecialchars(ZS_I18n::t('stat_scanned_files'), ENT_QUOTES, 'UTF-8'); ?></div></div>
-            <div class="stat-box"><div class="stat-num danger"><?php echo count($infectedJs); ?></div><div><?php echo htmlspecialchars(ZS_I18n::t('stat_infected_files'), ENT_QUOTES, 'UTF-8'); ?></div></div>
-            <div class="stat-box"><div class="stat-num success"><?php echo number_format(isset($session['trusted_bypassed']) ? $session['trusted_bypassed'] : 0); ?></div><div><?php echo htmlspecialchars(ZS_I18n::t('stat_trusted_bypassed'), ENT_QUOTES, 'UTF-8'); ?></div></div>
-            <div class="stat-box"><div class="stat-num"><?php echo intval($stats['quarantined']); ?></div><div><?php echo htmlspecialchars(ZS_I18n::t('stat_quarantined'), ENT_QUOTES, 'UTF-8'); ?></div></div>
+            <div class="stat-box"><div class="stat-num" id="statScannedFiles"><?php echo number_format(isset($session['scanned_files']) ? $session['scanned_files'] : 0); ?></div><div><?php echo htmlspecialchars(ZS_I18n::t('stat_scanned_files'), ENT_QUOTES, 'UTF-8'); ?></div></div>
+            <div class="stat-box"><div class="stat-num danger" id="statInfectedFiles"><?php echo count($infectedJs); ?></div><div><?php echo htmlspecialchars(ZS_I18n::t('stat_infected_files'), ENT_QUOTES, 'UTF-8'); ?></div></div>
+            <div class="stat-box"><div class="stat-num success" id="statTrustedBypassed"><?php echo number_format(isset($session['trusted_bypassed']) ? $session['trusted_bypassed'] : 0); ?></div><div><?php echo htmlspecialchars(ZS_I18n::t('stat_trusted_bypassed'), ENT_QUOTES, 'UTF-8'); ?></div></div>
+            <div class="stat-box"><div class="stat-num" id="statQuarantined"><?php echo intval($stats['quarantined']); ?></div><div><?php echo htmlspecialchars(ZS_I18n::t('stat_quarantined'), ENT_QUOTES, 'UTF-8'); ?></div></div>
         </div>
         <div style="margin: 20px 0; display: flex; gap: 10px; flex-wrap: wrap;">
             <form method="POST" action="" onsubmit="return confirm(window.ZS_I18N.confirm_rescan || '');">
@@ -271,38 +287,38 @@ class ZS_Ui {
                 <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8'); ?>">
                 <button type="submit" class="btn btn-gray"><?php echo htmlspecialchars(ZS_I18n::t('btn_rescan'), ENT_QUOTES, 'UTF-8'); ?></button>
             </form>
-            <?php if (!empty($infectedJs)) : ?>
-                <button type="button" class="btn btn-purple" id="btnStartReview"><?php echo htmlspecialchars(ZS_I18n::t('btn_review'), ENT_QUOTES, 'UTF-8'); ?></button>
-                <button type="button" class="btn btn-blue" id="btnStartAuto"><?php echo htmlspecialchars(ZS_I18n::t('btn_auto_ai'), ENT_QUOTES, 'UTF-8'); ?></button>
-            <?php endif; ?>
+            <button type="button" class="btn btn-purple" id="btnStartReview" style="<?php echo empty($infectedJs) ? 'display:none;' : ''; ?>"><?php echo htmlspecialchars(ZS_I18n::t('btn_review'), ENT_QUOTES, 'UTF-8'); ?></button>
+            <button type="button" class="btn btn-blue" id="btnStartAuto" style="<?php echo empty($infectedJs) ? 'display:none;' : ''; ?>"><?php echo htmlspecialchars(ZS_I18n::t('btn_auto_ai'), ENT_QUOTES, 'UTF-8'); ?></button>
         </div>
         <p style="font-size:12px;color:#94a3b8;"><?php echo htmlspecialchars(ZS_I18n::t('ai_advisory'), ENT_QUOTES, 'UTF-8'); ?></p>
 
-        <h3><?php echo htmlspecialchars(ZS_I18n::t('stat_infected_files'), ENT_QUOTES, 'UTF-8'); ?> (<?php echo count($infectedJs); ?>)</h3>
-        <?php if (empty($infectedJs)) : ?>
-            <p style="color:#4ade80;"><?php echo htmlspecialchars(ZS_I18n::t('no_threats_found'), ENT_QUOTES, 'UTF-8'); ?></p>
-        <?php else : ?>
-            <table>
-                <thead><tr>
-                    <th style="width:30px;"><input type="checkbox" id="selectAllFindings" title="Select / Deselect All"></th><th>#</th><th><?php echo htmlspecialchars(ZS_I18n::t('table_path'), ENT_QUOTES, 'UTF-8'); ?></th>
-                    <th><?php echo htmlspecialchars(ZS_I18n::t('table_reason'), ENT_QUOTES, 'UTF-8'); ?></th>
-                    <th><?php echo htmlspecialchars(ZS_I18n::t('table_actions'), ENT_QUOTES, 'UTF-8'); ?></th>
-                </tr></thead>
-                <tbody id="infectedTableBody">
-                <?php foreach ($infectedJs as $row) : ?>
-                    <tr id="<?php echo htmlspecialchars($row['row_id'], ENT_QUOTES, 'UTF-8'); ?>">
-                        <td><input type="checkbox" class="share-select" data-finding-id="<?php echo htmlspecialchars($row['finding_id'], ENT_QUOTES, 'UTF-8'); ?>"></td>
-                        <td><?php echo intval($row['idx']) + 1; ?></td>
-                        <td class="dir-path"></td>
-                        <td class="reason-cell"></td>
-                        <td class="action-cell">
-                            <button type="button" class="btn-view-single" data-finding-id="<?php echo htmlspecialchars($row['finding_id'], ENT_QUOTES, 'UTF-8'); ?>" data-review-idx="<?php echo intval($row['idx']); ?>"><?php echo htmlspecialchars(ZS_I18n::t('btn_inspect'), ENT_QUOTES, 'UTF-8'); ?></button>
-                            <button type="button" class="btn-del-single" data-finding-id="<?php echo htmlspecialchars($row['finding_id'], ENT_QUOTES, 'UTF-8'); ?>" data-raw="<?php echo htmlspecialchars($row['raw_sha256'], ENT_QUOTES, 'UTF-8'); ?>"><?php echo htmlspecialchars(ZS_I18n::t('btn_delete'), ENT_QUOTES, 'UTF-8'); ?></button>
-                        </td>
-                    </tr>
-                <?php endforeach; ?>
-                </tbody>
-            </table>
+        <h3 id="infectedCountHeader"><?php echo htmlspecialchars(ZS_I18n::t('stat_infected_files'), ENT_QUOTES, 'UTF-8'); ?> (<span id="headerInfectedCount"><?php echo count($infectedJs); ?></span>)</h3>
+        <p id="noThreatsMsg" style="color:#4ade80;<?php echo empty($infectedJs) ? '' : 'display:none;'; ?>"><?php echo htmlspecialchars(ZS_I18n::t('no_threats_found'), ENT_QUOTES, 'UTF-8'); ?></p>
+        <table id="infectedTable" style="<?php echo empty($infectedJs) ? 'display:none;' : ''; ?>">
+            <thead><tr>
+                <th style="width:30px;"><input type="checkbox" id="selectAllFindings" title="Select / Deselect All"></th><th>#</th><th><?php echo htmlspecialchars(ZS_I18n::t('table_path'), ENT_QUOTES, 'UTF-8'); ?></th>
+                <th><?php echo htmlspecialchars(ZS_I18n::t('table_reason'), ENT_QUOTES, 'UTF-8'); ?></th>
+                <th><?php echo htmlspecialchars(ZS_I18n::t('table_actions'), ENT_QUOTES, 'UTF-8'); ?></th>
+            </tr></thead>
+            <tbody id="infectedTableBody">
+            <?php foreach ($infectedJs as $row) : ?>
+                <tr id="<?php echo htmlspecialchars($row['row_id'], ENT_QUOTES, 'UTF-8'); ?>">
+                    <td><input type="checkbox" class="share-select" data-finding-id="<?php echo htmlspecialchars($row['finding_id'], ENT_QUOTES, 'UTF-8'); ?>"></td>
+                    <td><?php echo intval($row['idx']) + 1; ?></td>
+                    <td class="dir-path"></td>
+                    <td class="reason-cell"></td>
+                    <td class="action-cell">
+                        <button type="button" class="btn-view-single" data-finding-id="<?php echo htmlspecialchars($row['finding_id'], ENT_QUOTES, 'UTF-8'); ?>" data-review-idx="<?php echo intval($row['idx']); ?>"><?php echo htmlspecialchars(ZS_I18n::t('btn_inspect'), ENT_QUOTES, 'UTF-8'); ?></button>
+                        <button type="button" class="btn-del-single" data-finding-id="<?php echo htmlspecialchars($row['finding_id'], ENT_QUOTES, 'UTF-8'); ?>" data-raw="<?php echo htmlspecialchars($row['raw_sha256'], ENT_QUOTES, 'UTF-8'); ?>"><?php echo htmlspecialchars(ZS_I18n::t('btn_delete'), ENT_QUOTES, 'UTF-8'); ?></button>
+                    </td>
+                </tr>
+            <?php endforeach; ?>
+            </tbody>
+        </table>
+        <?php if (!$isCompleted) : ?>
+            <noscript>
+                <meta http-equiv="refresh" content="3;url=?nojs=1">
+            </noscript>
         <?php endif; ?>
 
         <?php if (!empty($autoJob['stats']) && $autoJob['status'] !== 'idle') : ?>
