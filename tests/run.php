@@ -2806,6 +2806,182 @@ run_test('Review navigation: delete_single and mark_clean update reviewed flag a
     @rmdir($tempDir);
 });
 
+// -------------------------------------------------------------
+// Review navigation: client deleteAndNext unlocks decisions and advances
+// -------------------------------------------------------------
+run_test('Review navigation: client deleteAndNext unlocks decisions and advances without freezing', function() use ($repoRoot) {
+    $jsPath = $repoRoot . '/src/assets/app.js';
+    assert_true(file_exists($jsPath), 'app.js must exist');
+    $jsContent = file_get_contents($jsPath);
+
+    // 1. Static code safety checks
+    assert_true(strpos($jsContent, 'function deleteAndNext()') !== false, 'deleteAndNext must be defined');
+    assert_true(preg_match('/setDecisionLocked\(false\);\s*nextReviewFile\(\);/s', $jsContent) === 1, 'deleteAndNext must unlock decisions before nextReviewFile');
+    assert_true(strpos($jsContent, 'setDecisionLocked(false);') !== false, 'setDecisionLocked(false) must be present in app.js');
+
+    // 2. Headless browser / Node.js VM runtime execution test if node is installed
+    $nodeBin = trim((string)shell_exec('command -v node'));
+    if ($nodeBin !== '') {
+        $nodeTestScript = <<<'NODE_SCRIPT'
+const fs = require('fs');
+const vm = require('vm');
+
+const appJs = process.argv[2];
+const code = fs.readFileSync(appJs, 'utf8');
+
+const elements = {};
+function getEl(id) {
+    if (!elements[id]) {
+        elements[id] = {
+            id,
+            style: {},
+            className: '',
+            classList: {
+                classes: [],
+                add: function(c) { if (!this.contains(c)) this.classes.push(c); },
+                remove: function(c) { this.classes = this.classes.filter(x => x !== c); },
+                contains: function(c) { return this.classes.includes(c); }
+            },
+            textContent: '',
+            disabled: false,
+            querySelector: () => null,
+            focus: () => {}
+        };
+    }
+    return elements[id];
+}
+
+let lastAlert = null;
+let fetchResolve;
+let fetchReject;
+let fetchCalls = 0;
+
+const sandbox = {
+    window: { location: { pathname: '/malware-cleaner.php' } },
+    document: {
+        addEventListener: () => {},
+        getElementById: (id) => getEl(id),
+        querySelectorAll: () => [],
+    },
+    localStorage: {
+        data: {},
+        getItem: function(k) { return this.data[k] || null; },
+        setItem: function(k, v) { this.data[k] = String(v); }
+    },
+    fetch: () => {
+        fetchCalls++;
+        return new Promise((res, rej) => { fetchResolve = res; fetchReject = rej; });
+    },
+    setTimeout: setTimeout,
+    alert: (msg) => { lastAlert = msg; },
+    FormData: class { append(k, v) { this[k] = v; } },
+    AbortController: class { abort() {} },
+    console: console,
+};
+sandbox.window.window = sandbox.window;
+sandbox.window.document = sandbox.document;
+sandbox.window.localStorage = sandbox.localStorage;
+sandbox.window.fetch = sandbox.fetch;
+sandbox.window.setTimeout = sandbox.setTimeout;
+sandbox.window.FormData = sandbox.FormData;
+sandbox.window.AbortController = sandbox.AbortController;
+
+vm.createContext(sandbox);
+vm.runInContext(code, sandbox);
+
+async function runTests() {
+    // Case 1: deleteAndNext locks during request, unlocks on success, advances index to 1
+    sandbox.window.REVIEW_ITEMS = [
+        { finding_id: 'f1', path: '/a.php', filename: 'a.php', status: 'FOUND', raw_sha256: 'h1', reason: 'r1', row_id: 'row1' },
+        { finding_id: 'f2', path: '/b.php', filename: 'b.php', status: 'FOUND', raw_sha256: 'h2', reason: 'r2', row_id: 'row2' },
+    ];
+    vm.runInContext('currentReviewIndex = 0; decisionsLocked = false;', sandbox);
+
+    fetchCalls = 0;
+    vm.runInContext('deleteAndNext()', sandbox);
+    const lockedDuring = vm.runInContext('decisionsLocked', sandbox);
+    if (!lockedDuring) throw new Error('Decisions must be locked during delete_single');
+    if (fetchCalls !== 1) throw new Error('Expected 1 fetch call, got ' + fetchCalls);
+
+    // Case 1b: double click while locked must be ignored
+    vm.runInContext('deleteAndNext()', sandbox);
+    if (fetchCalls !== 1) throw new Error('Double click while decisions locked must be ignored');
+
+    fetchResolve({ json: () => Promise.resolve({ success: true, message: 'Quarantined' }) });
+    await new Promise(r => setTimeout(r, 40));
+
+    const idxAfter = vm.runInContext('currentReviewIndex', sandbox);
+    if (idxAfter !== 1) throw new Error('currentReviewIndex did not advance to 1 (got ' + idxAfter + ')');
+    if (sandbox.window.REVIEW_ITEMS[0].status !== 'QUARANTINED') throw new Error('Status was not set to QUARANTINED');
+
+    // Case 2: deleteAndNext on last item closes modal and leaves decisions unlocked
+    sandbox.window.REVIEW_ITEMS = [
+        { finding_id: 'f_last', path: '/last.php', filename: 'last.php', status: 'FOUND', raw_sha256: 'hl', reason: 'rl' },
+    ];
+    vm.runInContext('currentReviewIndex = 0; decisionsLocked = false; isModalActive = true;', sandbox);
+
+    vm.runInContext('deleteAndNext()', sandbox);
+    fetchResolve({ json: () => Promise.resolve({ success: true, message: 'Quarantined last' }) });
+    await new Promise(r => setTimeout(r, 40));
+
+    const isModalActive = vm.runInContext('isModalActive', sandbox);
+    const lockedLast = vm.runInContext('decisionsLocked', sandbox);
+    if (isModalActive) throw new Error('Modal should close after last item is deleted');
+    if (lockedLast) throw new Error('Decisions should be unlocked after last item is deleted');
+
+    // Case 3: delete failure unlocks decisions and alerts without freezing
+    sandbox.window.REVIEW_ITEMS = [
+        { finding_id: 'f_err', path: '/err.php', filename: 'err.php', status: 'FOUND', raw_sha256: 'he', reason: 're' },
+    ];
+    vm.runInContext('currentReviewIndex = 0; decisionsLocked = false;', sandbox);
+    lastAlert = null;
+
+    vm.runInContext('deleteAndNext()', sandbox);
+    fetchResolve({ json: () => Promise.resolve({ success: false, message: 'Disk read-only' }) });
+    await new Promise(r => setTimeout(r, 40));
+
+    const lockedErr = vm.runInContext('decisionsLocked', sandbox);
+    if (lockedErr) throw new Error('Decisions should be unlocked after failure');
+    if (lastAlert !== 'Disk read-only') throw new Error('User was not alerted with error message: ' + lastAlert);
+
+    // Case 4: network rejection unlocks decisions and alerts without freezing
+    vm.runInContext('currentReviewIndex = 0; decisionsLocked = false;', sandbox);
+    lastAlert = null;
+
+    vm.runInContext('deleteAndNext()', sandbox);
+    fetchReject(new Error('Connection timed out'));
+    await new Promise(r => setTimeout(r, 40));
+
+    const lockedNet = vm.runInContext('decisionsLocked', sandbox);
+    if (lockedNet) throw new Error('Decisions should be unlocked after network error');
+    if (lastAlert !== 'Connection timed out') throw new Error('User was not alerted on network failure: ' + lastAlert);
+
+    // Case 5: saveReviewState preserves overrides
+    vm.runInContext('isModalActive = true; currentReviewIndex = 2; saveReviewState({ modal_open: false, index: 0 });', sandbox);
+    const savedState = JSON.parse(sandbox.localStorage.getItem('zs_review_default'));
+    if (savedState.modal_open !== false || savedState.index !== 0) {
+        throw new Error('saveReviewState did not preserve explicit overrides: ' + JSON.stringify(savedState));
+    }
+
+    console.log('NODE_OK');
+}
+
+runTests().catch(err => {
+    console.error(err);
+    process.exit(1);
+});
+NODE_SCRIPT;
+
+        $tmpNodeScript = tempnam(sys_get_temp_dir(), 'zs_node_nav_') . '.js';
+        file_put_contents($tmpNodeScript, $nodeTestScript);
+        exec(escapeshellcmd($nodeBin) . ' ' . escapeshellarg($tmpNodeScript) . ' ' . escapeshellarg($jsPath), $nodeOut, $nodeCode);
+        @unlink($tmpNodeScript);
+
+        assert_equals(0, $nodeCode, 'Node runtime test for deleteAndNext failed: ' . implode("\n", $nodeOut));
+        assert_true(in_array('NODE_OK', $nodeOut, true), 'Node test must output NODE_OK');
+    }
+});
+
 
 if ($prevEnvKey !== false) {
     putenv('GEMINI_API_KEY=' . $prevEnvKey);
