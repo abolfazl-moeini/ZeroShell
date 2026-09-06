@@ -3810,6 +3810,183 @@ NODE_SCRIPT;
     assert_true(in_array('NODE_NAV_OK', $nodeOut, true), 'Node test must output NODE_NAV_OK');
 });
 
+run_test('Review navigation: modalCounter preserves total and increments current index during mark clean and quarantine', function () use ($repoRoot) {
+    $jsPath = $repoRoot . '/src/assets/app.js';
+    $nodeBin = trim((string)shell_exec('command -v node'));
+    if ($nodeBin === '') {
+        assert_true(true, 'Node not available; skipping browser runtime test');
+        return;
+    }
+
+    $nodeScript = <<<'NODE_SCRIPT'
+const fs = require('fs');
+const vm = require('vm');
+
+const jsPath = process.argv[2];
+const code = fs.readFileSync(jsPath, 'utf8');
+
+const elements = {};
+function getEl(id) {
+    if (!elements[id]) {
+        elements[id] = {
+            id,
+            style: {},
+            className: '',
+            classList: {
+                classes: [],
+                add: function(c) { if (!this.contains(c)) this.classes.push(c); },
+                remove: function(c) { this.classes = this.classes.filter(x => x !== c); },
+                contains: function(c) { return this.classes.includes(c); }
+            },
+            textContent: '',
+            disabled: false,
+            setAttribute: () => {},
+            removeAttribute: () => {},
+            getAttribute: () => null,
+            querySelector: () => null,
+            querySelectorAll: () => [],
+            remove: () => {},
+            focus: () => {}
+        };
+    }
+    return elements[id];
+}
+
+const sandbox = {
+    window: { location: { pathname: '/malware-cleaner.php' } },
+    document: {
+        addEventListener: () => {},
+        getElementById: (id) => getEl(id),
+        querySelector: () => null,
+        querySelectorAll: () => [],
+        activeElement: null,
+    },
+    localStorage: {
+        data: {},
+        getItem: function(k) { return this.data[k] || null; },
+        setItem: function(k, v) { this.data[k] = String(v); }
+    },
+    fetch: (url, opts) => {
+        let res = { success: true };
+        if (opts && opts.body) {
+            if (opts.body.do_action === 'mark_clean') {
+                res = { success: true, status: 'promoted_to_trusted', message: 'Trusted' };
+            } else if (opts.body.do_action === 'delete_single') {
+                res = { success: true, message: 'Quarantined', backup_name: 'b1' };
+            }
+        }
+        return Promise.resolve({
+            ok: true,
+            text: () => Promise.resolve(JSON.stringify({ success: true, content: 'code', filename: 'test.php' })),
+            json: () => Promise.resolve(res)
+        });
+    },
+    setTimeout: setTimeout,
+    clearTimeout: clearTimeout,
+    alert: () => {},
+    FormData: class { append(k, v) { this[k] = v; } },
+    AbortController: class { abort() {} },
+    console: console,
+};
+sandbox.window.window = sandbox.window;
+sandbox.window.document = sandbox.document;
+sandbox.window.localStorage = sandbox.localStorage;
+sandbox.window.fetch = sandbox.fetch;
+sandbox.window.setTimeout = sandbox.setTimeout;
+sandbox.window.FormData = sandbox.FormData;
+sandbox.window.AbortController = sandbox.AbortController;
+
+vm.createContext(sandbox);
+vm.runInContext(code, sandbox);
+
+async function runTest() {
+    sandbox.window.REVIEW_ITEMS = [
+        { finding_id: 'f0', path: '/f0.php', filename: 'f0.php', status: 'FOUND', raw_sha256: 'h0', reason: 'r0' },
+        { finding_id: 'f1', path: '/f1.php', filename: 'f1.php', status: 'FOUND', raw_sha256: 'h1', reason: 'r1' },
+        { finding_id: 'f2', path: '/f2.php', filename: 'f2.php', status: 'FOUND', raw_sha256: 'h2', reason: 'r2' },
+        { finding_id: 'f3', path: '/f3.php', filename: 'f3.php', status: 'FOUND', raw_sha256: 'h3', reason: 'r3' },
+        { finding_id: 'f4', path: '/f4.php', filename: 'f4.php', status: 'FOUND', raw_sha256: 'h4', reason: 'r4' },
+    ];
+    sandbox.window.ZS_BOOT = { review_cursor: 0, session_id: 's1' };
+    sandbox.window.ZS_SESSION_ID = 's1';
+
+    // 1. Initial start review mode -> item 0
+    vm.runInContext('startReviewMode(undefined, false);', sandbox);
+    await new Promise(r => setTimeout(r, 20));
+
+    let counter = elements['modalCounter'].textContent;
+    let totalLen = sandbox.window.REVIEW_ITEMS.length;
+    let curIdx = vm.runInContext('currentReviewIndex', sandbox);
+
+    if (totalLen !== 5) throw new Error('Initial REVIEW_ITEMS length must be 5, got ' + totalLen);
+    if (curIdx !== 0) throw new Error('Initial currentReviewIndex must be 0, got ' + curIdx);
+    if (counter !== '1 / 5') throw new Error('Initial modalCounter must be "1 / 5", got "' + counter + '"');
+
+    // 2. User marks f0 clean -> promotes to trusted
+    vm.runInContext('markCleanCurrent();', sandbox);
+    await new Promise(r => setTimeout(r, 50));
+
+    totalLen = sandbox.window.REVIEW_ITEMS.length;
+    curIdx = vm.runInContext('currentReviewIndex', sandbox);
+    counter = elements['modalCounter'].textContent;
+
+    if (totalLen !== 5) throw new Error('REVIEW_ITEMS length must remain 5 after mark_clean, got ' + totalLen);
+    if (curIdx !== 1) throw new Error('currentReviewIndex must advance to 1, got ' + curIdx);
+    if (counter !== '2 / 5') throw new Error('modalCounter must be "2 / 5" after mark clean (not "1 / 4"), got "' + counter + '"');
+    if (sandbox.window.REVIEW_ITEMS[0].status !== 'TRUSTED_HIDDEN') throw new Error('f0 status must be TRUSTED_HIDDEN, got ' + sandbox.window.REVIEW_ITEMS[0].status);
+    if (!sandbox.window.REVIEW_ITEMS[0].reviewed) throw new Error('f0 must be marked reviewed');
+
+    // 3. User marks f1 clean -> promotes to trusted
+    vm.runInContext('markCleanCurrent();', sandbox);
+    await new Promise(r => setTimeout(r, 50));
+
+    totalLen = sandbox.window.REVIEW_ITEMS.length;
+    curIdx = vm.runInContext('currentReviewIndex', sandbox);
+    counter = elements['modalCounter'].textContent;
+
+    if (totalLen !== 5) throw new Error('REVIEW_ITEMS length must remain 5 after second mark_clean, got ' + totalLen);
+    if (curIdx !== 2) throw new Error('currentReviewIndex must advance to 2, got ' + curIdx);
+    if (counter !== '3 / 5') throw new Error('modalCounter must be "3 / 5" after second mark clean (not "1 / 3"), got "' + counter + '"');
+
+    // 4. User quarantines f2 via deleteAndNext
+    vm.runInContext('deleteAndNext();', sandbox);
+    await new Promise(r => setTimeout(r, 50));
+
+    totalLen = sandbox.window.REVIEW_ITEMS.length;
+    curIdx = vm.runInContext('currentReviewIndex', sandbox);
+    counter = elements['modalCounter'].textContent;
+
+    if (totalLen !== 5) throw new Error('REVIEW_ITEMS length must remain 5 after quarantine, got ' + totalLen);
+    if (curIdx !== 3) throw new Error('currentReviewIndex must advance to 3, got ' + curIdx);
+    if (counter !== '4 / 5') throw new Error('modalCounter must be "4 / 5" after quarantine, got "' + counter + '"');
+
+    // 5. User navigates back via prevReviewFile
+    vm.runInContext('prevReviewFile();', sandbox);
+    await new Promise(r => setTimeout(r, 20));
+
+    curIdx = vm.runInContext('currentReviewIndex', sandbox);
+    counter = elements['modalCounter'].textContent;
+    if (curIdx !== 2) throw new Error('currentReviewIndex must move back to 2, got ' + curIdx);
+    if (counter !== '3 / 5') throw new Error('modalCounter must be "3 / 5" after prev, got "' + counter + '"');
+
+    console.log('NODE_COUNTER_OK');
+}
+
+runTest().catch(err => {
+    console.error(err);
+    process.exit(1);
+});
+NODE_SCRIPT;
+
+    $tmpScript = tempnam(sys_get_temp_dir(), 'zs_node_cnt_') . '.js';
+    file_put_contents($tmpScript, $nodeScript);
+    exec(escapeshellcmd($nodeBin) . ' ' . escapeshellarg($tmpScript) . ' ' . escapeshellarg($jsPath), $nodeOut, $nodeCode);
+    @unlink($tmpScript);
+
+    assert_equals(0, $nodeCode, 'Node runtime test for modalCounter failed: ' . implode("\n", $nodeOut));
+    assert_true(in_array('NODE_COUNTER_OK', $nodeOut, true), 'Node test must output NODE_COUNTER_OK');
+});
+
 // -------------------------------------------------------------
 // PHP Syntax Highlighting: Tokenization & Fidelity
 // -------------------------------------------------------------

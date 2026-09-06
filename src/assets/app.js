@@ -863,36 +863,33 @@ function markCleanCurrent() {
         showToast(data.message);
         file.reviewed = true;
         markItemReviewedInStorage(file.finding_id);
-        if (data && typeof data.review_cursor === 'number') {
-            if (window.ZS_BOOT) window.ZS_BOOT.review_cursor = data.review_cursor;
-            reviewCursor = Math.max(reviewCursor, data.review_cursor);
-            saveReviewState({ review_cursor: reviewCursor, sequential_index: reviewCursor, is_single_inspect: false });
-        }
         if (data.status === 'promoted_to_trusted') {
             const trustedHash = file.raw_sha256;
             window.REVIEW_ITEMS.forEach(function (it) {
                 if (it.raw_sha256 === trustedHash) {
+                    it.status = 'TRUSTED_HIDDEN';
+                    it.reviewed = true;
+                    markItemReviewedInStorage(it.finding_id);
                     const row = document.getElementById(it.row_id);
                     if (row) row.remove();
                 }
             });
-            window.REVIEW_ITEMS = window.REVIEW_ITEMS.filter(function (it) {
-                return it.raw_sha256 !== trustedHash;
-            });
-            if (window.REVIEW_ITEMS.length === 0) {
-                setDecisionLocked(false);
-                closeViewModal();
-                return;
-            }
-            if (currentReviewIndex >= window.REVIEW_ITEMS.length) {
-                currentReviewIndex = window.REVIEW_ITEMS.length - 1;
-            }
-            if (reviewCursor >= window.REVIEW_ITEMS.length) {
-                reviewCursor = Math.max(0, window.REVIEW_ITEMS.length - 1);
-            }
+            const totalThreats = (window.REVIEW_ITEMS || []).filter(function (it) {
+                return it.status !== 'TRUSTED_HIDDEN' && it.status !== 'TRUSTED';
+            }).length;
+            const elInfected = document.getElementById('statInfectedFiles');
+            if (elInfected) elInfected.textContent = String(totalThreats);
+            const elHeaderCount = document.getElementById('headerInfectedCount');
+            if (elHeaderCount) elHeaderCount.textContent = String(totalThreats);
+
             setDecisionLocked(false);
-            loadCurrentFile();
+            nextReviewFile();
             return;
+        }
+        if (data && typeof data.review_cursor === 'number') {
+            if (window.ZS_BOOT) window.ZS_BOOT.review_cursor = data.review_cursor;
+            reviewCursor = Math.max(reviewCursor, data.review_cursor);
+            saveReviewState({ review_cursor: reviewCursor, sequential_index: reviewCursor, is_single_inspect: false });
         }
         if (data.status === 'candidate_added' || data.status === 'candidate_already_recorded') {
             window.REVIEW_ITEMS.forEach(function (it) {
