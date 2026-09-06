@@ -185,7 +185,9 @@ class ZS_Engine {
                         if (strpos($relPath, '/wp-content/uploads/') !== false || strpos($relPath, '/classes/wp-content/uploads/') !== false) {
                             $ext = strtolower(pathinfo($path, PATHINFO_EXTENSION));
                             if ($ext === 'php' || $ext === 'phtml' || $ext === 'php5' || $ext === 'php7') {
-                                $hit = true;
+                                if (!self::isBenignPlaceholderPhp($content)) {
+                                    $hit = true;
+                                }
                             }
                         }
                         break;
@@ -262,5 +264,46 @@ class ZS_Engine {
         $snip = substr($content, $start, $len);
         $clean = str_replace(array("\r", "\n"), ' ', $snip);
         return ZS_Config::ensureUtf8($clean);
+    }
+
+    public static function isBenignPlaceholderPhp($content) {
+        if (!is_string($content)) {
+            return false;
+        }
+        $trimmed = trim($content);
+        if ($trimmed === '' || $trimmed === '<?php' || $trimmed === '<?php ?>' || $trimmed === '<?php?>') {
+            return true;
+        }
+        if (strpos($trimmed, '<?') !== 0) {
+            return false;
+        }
+        if (function_exists('token_get_all')) {
+            $tokens = @token_get_all($content);
+            if (is_array($tokens)) {
+                $hasExecutable = false;
+                foreach ($tokens as $t) {
+                    if (is_array($t)) {
+                        $id = $t[0];
+                        if ($id === T_OPEN_TAG || $id === T_CLOSE_TAG || $id === T_WHITESPACE || $id === T_COMMENT || (defined('T_DOC_COMMENT') && $id === T_DOC_COMMENT)) {
+                            continue;
+                        }
+                        $hasExecutable = true;
+                        break;
+                    } else {
+                        $hasExecutable = true;
+                        break;
+                    }
+                }
+                if (!$hasExecutable) {
+                    return true;
+                }
+            }
+        }
+        $stripped = preg_replace('/^<\?(php)?/i', '', $trimmed);
+        $stripped = preg_replace('/\?>$/', '', trim($stripped));
+        $stripped = preg_replace('/\/\*.*?\*\//s', '', $stripped);
+        $stripped = preg_replace('/\/\/.*?$/m', '', $stripped);
+        $stripped = preg_replace('/#.*?$/m', '', $stripped);
+        return trim($stripped) === '';
     }
 }

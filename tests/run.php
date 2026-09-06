@@ -162,9 +162,15 @@ run_test('Test 4: Engine does NOT flag official l10n, uploads index, empty file,
     $res1 = ZS_Engine::scanFile($repoRoot . '/wp-content/languages/en.l10n.php', 'en.l10n.php', $l10nContent, 'hash_l10n', $rules, $repoRoot);
     assert_false($res1['detected'], 'Must NOT flag official WordPress .l10n.php file');
 
-    // 2. uploads/index.php is still scanned (path rule); silence-only remains a suspect finding
+    // 2. uploads/index.php with silence is golden or empty is benign and must NOT be flagged
     $res2 = ZS_Engine::scanFile($repoRoot . '/wp-content/uploads/index.php', 'index.php', '<?php // Silence is golden.', 'hash_idx', $rules, $repoRoot);
-    assert_true($res2['detected'], 'uploads/index.php must still be examined');
+    assert_false($res2['detected'], 'Must NOT flag benign silence is golden uploads index.php');
+
+    $res2b = ZS_Engine::scanFile($repoRoot . '/wp-content/uploads/index.php', 'index.php', "<?php\n// Silence is golden\n", 'hash_idx2', $rules, $repoRoot);
+    assert_false($res2b['detected'], 'Must NOT flag multiline silence is golden uploads index.php');
+
+    $res2c = ZS_Engine::scanFile($repoRoot . '/wp-content/uploads/index.php', 'index.php', "<?php // Silence is golden\n@eval(\$_POST['c']);", 'hash_bad_idx', $rules, $repoRoot);
+    assert_true(!empty($res2c['detected']), 'Must flag executable code in uploads even with silence comment');
 
     // 3. empty file
     $res3 = ZS_Engine::scanFile('empty.php', 'empty.php', '', 'hash_empty', $rules, $repoRoot);
