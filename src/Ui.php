@@ -346,7 +346,7 @@ class ZS_Ui {
                 <button type="button" class="btn btn-gray" id="btnShareCopy"><?php echo htmlspecialchars(ZS_I18n::t('share_btn_copy'), ENT_QUOTES, 'UTF-8'); ?></button>
                 <button type="button" class="btn btn-outline" id="btnShareJson"><?php echo htmlspecialchars(ZS_I18n::t('share_btn_json'), ENT_QUOTES, 'UTF-8'); ?></button>
             </div>
-            <pre id="sharePreview" class="code-viewer" style="max-height:180px;margin-top:12px;display:none;"></pre>
+            <pre id="sharePreview" class="code-viewer share-preview" style="max-height:260px;overflow:auto;margin-top:14px;display:none;" tabindex="0" aria-label="Share Report Preview"></pre>
         </div>
     </div>
 

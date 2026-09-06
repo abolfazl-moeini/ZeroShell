@@ -1794,6 +1794,9 @@ function bindUi() {
             } else {
                 pre.textContent = data.markdown_body || JSON.stringify(data.preview || data.bundle, null, 2);
             }
+            if (typeof pre.scrollIntoView === 'function') {
+                pre.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            }
         }
         if (openGithub !== false && data.github_url) {
             window.open(data.github_url, '_blank', 'noopener,noreferrer');

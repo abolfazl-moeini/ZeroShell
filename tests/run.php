@@ -4784,6 +4784,46 @@ NODE_SCRIPT;
     assert_true(in_array('NODE_OK', $out), 'Node script did not output NODE_OK');
 });
 
+run_test('Share Preview Box: CSS and HTML markup enforce overflow containment and dark theme styling', function () use ($repoRoot) {
+    // 1. Verify app.css contains .share-preview with overflow containment and styles
+    $cssPath = $repoRoot . '/src/assets/app.css';
+    $css = file_get_contents($cssPath);
+    assert_true(strpos($css, '.share-preview') !== false, '.share-preview class must be defined in app.css');
+    assert_true(strpos($css, 'overflow-y: auto') !== false || strpos($css, 'overflow: auto') !== false, 'CSS must specify overflow containment');
+    assert_true(strpos($css, 'max-height: 260px') !== false, 'CSS must set max-height limit');
+    assert_true(strpos($css, 'scrollbar-width: thin') !== false, 'CSS must style scrollbar width');
+    assert_true(strpos($css, 'background: #0b1120') !== false, 'CSS must set dark background');
+
+    // 2. Verify Ui::renderReport outputs sharePreview element with overflow containment
+    $tempDir = sys_get_temp_dir() . '/zs_share_preview_' . bin2hex(random_bytes(6));
+    @mkdir($tempDir, 0777, true);
+    $config = array('key_hash' => hash('sha256', 'test_key'), 'csrf_secret' => 'test_csrf_secret');
+    $store = new ZS_Store($tempDir);
+    $session = array(
+        'scan_id' => 'sess_test',
+        'is_completed' => true,
+        'infected_files' => array(),
+        'cursor' => '',
+        'stats' => array('scanned' => 5, 'infected' => 0, 'trusted' => 0),
+        'auto_job' => array('status' => 'idle', 'stats' => array()),
+    );
+
+    ob_start();
+    ZS_Ui::renderReport($session, $tempDir, $tempDir, $config, $store);
+    $html = ob_get_clean();
+
+    assert_true(strpos($html, 'id="sharePreview"') !== false, 'Report must contain #sharePreview element');
+    assert_true(strpos($html, 'class="code-viewer share-preview"') !== false, '#sharePreview must have share-preview class');
+    assert_true(strpos($html, 'overflow:auto') !== false, '#sharePreview inline style must enforce overflow:auto');
+    assert_true(strpos($html, 'max-height:260px') !== false, '#sharePreview inline style must enforce max-height');
+
+    @unlink($store->getSessionFile());
+    @unlink($store->getKnowledgeFile());
+    @unlink(ZS_Config::getConfigFile($tempDir));
+    @rmdir($tempDir);
+});
+
+
 if ($prevEnvKey !== false) {
     putenv('GEMINI_API_KEY=' . $prevEnvKey);
     $_ENV['GEMINI_API_KEY'] = $prevEnvKey;
