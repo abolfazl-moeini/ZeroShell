@@ -396,7 +396,7 @@ class ZS_Http {
             'delete_single', 'restore_file', 'mark_clean', 'revoke_trusted',
             'revoke_candidate', 'clear_ai_cache', 'ask_ai', 'auto_review_step',
             'auto_review_control', 'save_settings', 'share_bundle', 'test_gemini',
-            'reset_scan', 'sync_rules',
+            'reset_scan', 'sync_rules', 'set_review_cursor',
         );
         if (in_array($action, $mutating, true)) {
             if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
@@ -409,7 +409,18 @@ class ZS_Http {
 
         switch ($action) {
             case 'view_file':
-                self::actionViewFile($rootDir, $store);
+                self::actionViewFile($rootDir, $store, $quarantineDir);
+                break;
+            case 'set_review_cursor':
+                $idx = isset($_POST['index']) ? intval($_POST['index']) : 0;
+                $fid = isset($_POST['finding_id']) ? trim((string)$_POST['finding_id']) : '';
+                $sid = isset($_POST['scan_session_id']) ? trim((string)$_POST['scan_session_id']) : '';
+                $session = $store->loadSession();
+                if (!is_array($session) || $sid === '' || $session['scan_session_id'] !== $sid) {
+                    self::jsonFail(400, 'Session mismatch.');
+                }
+                $store->setReviewCursor($idx, $fid);
+                self::jsonOk(array('success' => true, 'review_cursor' => $idx));
                 break;
             case 'delete_single':
                 self::actionDeleteSingle($rootDir, $quarantineDir, $store);
@@ -501,27 +512,57 @@ class ZS_Http {
         return array('ok' => true, 'session' => $session, 'index' => $found['index'], 'item' => $item, 'path' => $path, 'raw' => isset($item['raw_sha256']) ? $item['raw_sha256'] : '');
     }
 
-    private static function actionViewFile($rootDir, $store) {
-        $resolved = self::resolveFinding($store, $rootDir, true);
+    private static function actionViewFile($rootDir, $store, $quarantineDir) {
+        $resolved = self::resolveFinding($store, $rootDir, false);
         if (empty($resolved['ok'])) {
             self::jsonFail(400, $resolved['message'], array('code' => isset($resolved['code']) ? $resolved['code'] : ''));
         }
+        $item = $resolved['item'];
         $path = $resolved['path'];
-        $size = filesize($path);
         $maxPreview = 1024 * 1024;
-        $content = @file_get_contents($path, false, null, 0, $maxPreview);
-        if ($content === false) {
-            self::jsonFail(500, 'Could not read file contents.');
+        $content = false;
+        $size = 0;
+        $isQuarantined = (!empty($item['backup_name']) || (isset($item['status']) && ($item['status'] === 'QUARANTINED' || $item['status'] === 'AI_QUARANTINED')));
+
+        if ($isQuarantined && !empty($item['backup_name'])) {
+            $payload = ZS_Quarantine::readPayload($quarantineDir, $item['backup_name']);
+            if ($payload !== false) {
+                $size = strlen($payload);
+                $content = substr($payload, 0, $maxPreview);
+            }
         }
+
+        if ($content === false) {
+            if (!ZS_Config::isRegularFile($path) || ZS_Config::pathHasSymlink($path, $rootDir) || !ZS_Config::isPathWithinRoot($path, $rootDir)) {
+                self::jsonFail(400, 'File is not a readable regular file inside the site root.', array('code' => 'MISSING'));
+            }
+            $currentRaw = ZS_Hash::rawFile($path);
+            $sessionRaw = isset($item['raw_sha256']) ? (string)$item['raw_sha256'] : '';
+            if ($currentRaw === false || $sessionRaw === '' || !hash_equals($sessionRaw, $currentRaw)) {
+                $store->updateInfectedItem($resolved['index'], array('status' => 'CHANGED_SINCE_SCAN'));
+                self::jsonFail(400, 'File changed since scan.', array('code' => 'CHANGED_SINCE_SCAN'));
+            }
+            $expected = isset($_POST['expected_raw']) ? trim((string)$_POST['expected_raw']) : (isset($_GET['expected_raw']) ? trim((string)$_GET['expected_raw']) : '');
+            if ($expected !== '' && !hash_equals($sessionRaw, $expected)) {
+                self::jsonFail(400, 'Expected hash mismatch.', array('code' => 'CHANGED_SINCE_SCAN'));
+            }
+            $size = filesize($path);
+            $content = @file_get_contents($path, false, null, 0, $maxPreview);
+            if ($content === false) {
+                self::jsonFail(500, 'Could not read file contents.');
+            }
+        }
+
         self::jsonOk(array(
-            'filename'     => basename($path),
-            'path'         => $path,
-            'size'         => $size,
-            'size_fmt'     => number_format($size) . ' B',
-            'content'      => $content,
-            'is_truncated' => ($size > $maxPreview),
-            'raw_sha256'   => $resolved['raw'],
-            'finding_id'   => $resolved['item']['finding_id'],
+            'filename'       => basename($path),
+            'path'           => $path,
+            'size'           => $size,
+            'size_fmt'       => number_format($size) . ' B',
+            'content'        => $content,
+            'is_truncated'   => ($size > $maxPreview),
+            'raw_sha256'     => $resolved['raw'],
+            'finding_id'     => $resolved['item']['finding_id'],
+            'is_quarantined' => $isQuarantined,
         ));
     }
 
@@ -536,7 +577,15 @@ class ZS_Http {
         ));
         if ($res['success']) {
             $store->revokeCandidate($resolved['raw']);
-            $store->updateInfectedItem($resolved['index'], array('status' => 'QUARANTINED', 'backup_name' => $res['backup_name']));
+            $store->updateInfectedItem($resolved['index'], array(
+                'status' => 'QUARANTINED',
+                'backup_name' => $res['backup_name'],
+                'reviewed' => true
+            ));
+            $sessAfter = $store->loadSession();
+            if (is_array($sessAfter)) {
+                $store->setReviewCursor($store->findFirstUnreviewedIndex($sessAfter));
+            }
             self::jsonOk(array('message' => ZS_I18n::t('toast_quarantined'), 'backup_name' => $res['backup_name']));
         }
         self::jsonFail(500, $res['message']);
@@ -567,6 +616,11 @@ class ZS_Http {
         }
         $sid = $resolved['session']['scan_session_id'];
         $res = $store->markClean($resolved['raw'], $resolved['path'], $sid);
+        $store->updateInfectedItem($resolved['index'], array('reviewed' => true));
+        $sessAfter = $store->loadSession();
+        if (is_array($sessAfter)) {
+            $store->setReviewCursor($store->findFirstUnreviewedIndex($sessAfter));
+        }
         self::jsonOk(array(
             'status'  => $res['status'],
             'message' => ($res['status'] === 'promoted_to_trusted')

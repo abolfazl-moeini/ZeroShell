@@ -79,11 +79,134 @@ function fillTableText() {
     });
 }
 
+function getReviewStorageKey() {
+    return 'zs_review_' + (window.ZS_SESSION_ID || 'default');
+}
+
+function loadSavedReviewState() {
+    try {
+        const raw = localStorage.getItem(getReviewStorageKey());
+        if (raw) return JSON.parse(raw);
+    } catch (e) {}
+    return null;
+}
+
+function saveReviewState(overrides) {
+    try {
+        const key = getReviewStorageKey();
+        let state = loadSavedReviewState() || {
+            index: currentReviewIndex,
+            modal_open: isModalActive,
+            reviewed_ids: {}
+        };
+        if (overrides) {
+            for (let k in overrides) {
+                state[k] = overrides[k];
+            }
+        }
+        state.index = currentReviewIndex;
+        state.modal_open = isModalActive;
+        const cur = currentFile();
+        if (cur) state.finding_id = cur.finding_id;
+        localStorage.setItem(key, JSON.stringify(state));
+    } catch (e) {}
+}
+
+function markItemReviewedInStorage(findingId) {
+    if (!findingId) return;
+    try {
+        const key = getReviewStorageKey();
+        let state = loadSavedReviewState() || {
+            index: currentReviewIndex,
+            modal_open: isModalActive,
+            reviewed_ids: {}
+        };
+        if (!state.reviewed_ids || typeof state.reviewed_ids !== 'object') {
+            state.reviewed_ids = {};
+        }
+        state.reviewed_ids[findingId] = true;
+        localStorage.setItem(key, JSON.stringify(state));
+    } catch (e) {}
+}
+
+function isFindingReviewed(item, savedReviewedIds) {
+    if (!item) return false;
+    if (item.reviewed) return true;
+    if (item.finding_id && savedReviewedIds && savedReviewedIds[item.finding_id]) return true;
+    const status = item.status || 'FOUND';
+    if (status === 'QUARANTINED' || status === 'AI_QUARANTINED' || status === 'RESTORED' ||
+        status === 'CHANGED_SINCE_SCAN' || status === 'FAILED_DELETE' ||
+        status === 'TRUSTED_HIDDEN' || status === 'TRUSTED') {
+        return true;
+    }
+    return false;
+}
+
+function calculateInitialReviewIndex() {
+    const items = window.REVIEW_ITEMS || [];
+    if (!items.length) return 0;
+
+    const saved = loadSavedReviewState();
+    const savedIds = (saved && saved.reviewed_ids) ? saved.reviewed_ids : {};
+
+    const firstUnreviewed = items.findIndex(function (item) {
+        return !isFindingReviewed(item, savedIds);
+    });
+
+    if (firstUnreviewed === -1) {
+        return items.length - 1;
+    }
+
+    if (saved && typeof saved.index === 'number' && saved.index >= 0 && saved.index < items.length) {
+        if (!isFindingReviewed(items[saved.index], savedIds)) {
+            return saved.index;
+        }
+    }
+
+    if (window.ZS_BOOT && typeof window.ZS_BOOT.review_cursor === 'number') {
+        const bootIdx = window.ZS_BOOT.review_cursor;
+        if (bootIdx >= 0 && bootIdx < items.length && !isFindingReviewed(items[bootIdx], savedIds)) {
+            return bootIdx;
+        }
+    }
+
+    return firstUnreviewed;
+}
+
+function updateActiveTableRow() {
+    document.querySelectorAll('#infectedTableBody tr.active-review-row').forEach(function (tr) {
+        tr.classList.remove('active-review-row');
+    });
+    const items = window.REVIEW_ITEMS || [];
+    if (currentReviewIndex >= 0 && currentReviewIndex < items.length) {
+        const file = items[currentReviewIndex];
+        if (file && file.row_id) {
+            const row = document.getElementById(file.row_id);
+            if (row) {
+                row.classList.add('active-review-row');
+            }
+        }
+    }
+}
+
 function setDecisionLocked(locked) {
     decisionsLocked = locked;
+    const file = currentFile();
+    const isQuarantined = file && (file.status === 'QUARANTINED' || file.status === 'AI_QUARANTINED');
     ['modalDeleteBtn', 'btnMarkClean', 'modalAskAiBtn', 'btnNextBottom', 'btnPrevTop', 'btnNextTop'].forEach(function (id) {
         const el = document.getElementById(id);
-        if (el) el.disabled = locked;
+        if (!el) return;
+        if (locked) {
+            el.disabled = true;
+        } else {
+            if (id === 'btnPrevTop') {
+                el.disabled = currentReviewIndex === 0;
+            } else if (id === 'modalDeleteBtn' || id === 'btnMarkClean' || id === 'modalAskAiBtn') {
+                el.disabled = !!isQuarantined;
+            } else {
+                el.disabled = false;
+            }
+        }
     });
 }
 
@@ -99,21 +222,26 @@ function startReviewMode(startIndex) {
         alert(t('no_threats_found'));
         return;
     }
-    if (typeof startIndex === 'number' && startIndex >= 0) {
-        const pos = items.findIndex(function (it) { return it.idx === startIndex; });
-        currentReviewIndex = pos >= 0 ? pos : 0;
+    if (typeof startIndex === 'string') {
+        const pos = items.findIndex(function (it) { return it.finding_id === startIndex; });
+        currentReviewIndex = pos >= 0 ? pos : calculateInitialReviewIndex();
+    } else if (typeof startIndex === 'number' && startIndex >= 0) {
+        let pos = items.findIndex(function (it) { return it.idx === startIndex; });
+        if (pos < 0 && startIndex < items.length) {
+            pos = startIndex;
+        }
+        currentReviewIndex = pos >= 0 ? pos : calculateInitialReviewIndex();
     } else {
-        const firstPending = items.findIndex(function (item) {
-            return item.status === 'FOUND' || item.status === 'AI_SKIPPED' || item.status === 'AI_ERROR';
-        });
-        currentReviewIndex = firstPending !== -1 ? firstPending : 0;
+        currentReviewIndex = calculateInitialReviewIndex();
     }
     lastFocused = document.activeElement;
     const modal = document.getElementById('fileViewerModal');
     if (modal) {
         modal.classList.add('active');
         isModalActive = true;
+        saveReviewState({ modal_open: true, index: currentReviewIndex });
         loadCurrentFile();
+        updateActiveTableRow();
         document.getElementById('btnCloseModal').focus();
     }
 }
@@ -122,6 +250,9 @@ function loadCurrentFile() {
     const items = window.REVIEW_ITEMS || [];
     if (currentReviewIndex < 0 || currentReviewIndex >= items.length) return;
     const file = items[currentReviewIndex];
+    saveReviewState({ index: currentReviewIndex });
+    updateActiveTableRow();
+
     const progressFill = document.getElementById('reviewProgressFill');
     if (progressFill) progressFill.style.width = Math.round(((currentReviewIndex + 1) / items.length) * 100) + '%';
     document.getElementById('modalCounter').textContent = (currentReviewIndex + 1) + ' / ' + items.length;
@@ -164,6 +295,10 @@ function loadCurrentFile() {
             if ((window.REVIEW_ITEMS[currentReviewIndex] || {}).finding_id !== loadId) return;
             if (data.success) {
                 codeEl.textContent = data.content + (data.is_truncated ? '\n\n' + t('modal_trunc_notice') : '');
+                if (data.is_quarantined) {
+                    file.status = file.status === 'AI_QUARANTINED' ? 'AI_QUARANTINED' : 'QUARANTINED';
+                    statusEl.textContent = file.status;
+                }
             } else {
                 codeEl.textContent = data.message || t('modal_err_read');
             }
@@ -183,6 +318,7 @@ function nextReviewFile() {
         currentReviewIndex++;
         loadCurrentFile();
     } else {
+        showToast(t('all_items_reviewed'));
         closeViewModal();
     }
 }
@@ -199,8 +335,27 @@ function closeViewModal() {
     const modal = document.getElementById('fileViewerModal');
     if (modal) modal.classList.remove('active');
     isModalActive = false;
+    saveReviewState({ modal_open: false, index: currentReviewIndex });
+    updateActiveTableRow();
     if (previewAbort) previewAbort.abort();
     if (lastFocused && lastFocused.focus) lastFocused.focus();
+}
+
+function skipAndNext() {
+    if (decisionsLocked) return;
+    const file = currentFile();
+    if (!file) return;
+    file.reviewed = true;
+    markItemReviewedInStorage(file.finding_id);
+    postForm({
+        do_action: 'set_review_cursor',
+        finding_id: file.finding_id,
+        scan_session_id: file.scan_session_id || window.ZS_SESSION_ID,
+        expected_raw: file.raw_sha256,
+        index: currentReviewIndex + 1,
+        skipped: '1'
+    }).catch(function () {});
+    nextReviewFile();
 }
 
 function currentFile() {
@@ -211,12 +366,15 @@ function deleteAndNext() {
     if (decisionsLocked) return;
     const file = currentFile();
     if (!file) return;
+    if (file.status === 'QUARANTINED' || file.status === 'AI_QUARANTINED') return;
     setDecisionLocked(true);
     const fields = findingFields(file);
     fields.do_action = 'delete_single';
     postForm(fields).then(function (data) {
         if (data.success) {
             file.status = 'QUARANTINED';
+            file.reviewed = true;
+            markItemReviewedInStorage(file.finding_id);
             showToast(data.message || t('toast_quarantined'));
             nextReviewFile();
         } else {
@@ -230,6 +388,7 @@ function markCleanCurrent() {
     if (decisionsLocked) return;
     const file = currentFile();
     if (!file) return;
+    if (file.status === 'QUARANTINED' || file.status === 'AI_QUARANTINED') return;
     const fields = findingFields(file);
     fields.do_action = 'mark_clean';
     postForm(fields).then(function (data) {
@@ -238,6 +397,8 @@ function markCleanCurrent() {
             return;
         }
         showToast(data.message);
+        file.reviewed = true;
+        markItemReviewedInStorage(file.finding_id);
         if (data.status === 'promoted_to_trusted') {
             const trustedHash = file.raw_sha256;
             window.REVIEW_ITEMS.forEach(function (it) {
@@ -249,9 +410,12 @@ function markCleanCurrent() {
             window.REVIEW_ITEMS = window.REVIEW_ITEMS.filter(function (it) {
                 return it.raw_sha256 !== trustedHash;
             });
-            if (window.REVIEW_ITEMS.length === 0 || currentReviewIndex >= window.REVIEW_ITEMS.length) {
+            if (window.REVIEW_ITEMS.length === 0) {
                 closeViewModal();
                 return;
+            }
+            if (currentReviewIndex >= window.REVIEW_ITEMS.length) {
+                currentReviewIndex = window.REVIEW_ITEMS.length - 1;
             }
             loadCurrentFile();
             return;
@@ -304,6 +468,7 @@ function closeGeminiKeyModal() {
 function askAiCurrent() {
     const file = currentFile();
     if (!file) return;
+    if (file.status === 'QUARANTINED' || file.status === 'AI_QUARANTINED') return;
     if (!window.ZS_BOOT || !window.ZS_BOOT.has_ai) {
         openGeminiKeyModal(function () {
             askAiCurrent();
@@ -510,6 +675,14 @@ function shareAction(extra) {
 
 function bindUi() {
     fillTableText();
+    currentReviewIndex = calculateInitialReviewIndex();
+    updateActiveTableRow();
+
+    const saved = loadSavedReviewState();
+    if (saved && saved.modal_open && (window.REVIEW_ITEMS || []).length > 0) {
+        startReviewMode();
+    }
+
     document.querySelectorAll('[data-switch-lang]').forEach(function (btn) {
         btn.addEventListener('click', function () { switchLang(btn.getAttribute('data-switch-lang')); });
     });
@@ -518,7 +691,14 @@ function bindUi() {
     const startAuto = document.getElementById('btnStartAuto');
     if (startAuto) startAuto.addEventListener('click', startAutoAiReview);
     document.querySelectorAll('[data-review-idx]').forEach(function (btn) {
-        btn.addEventListener('click', function () { startReviewMode(parseInt(btn.getAttribute('data-review-idx'), 10)); });
+        btn.addEventListener('click', function () {
+            const fid = btn.getAttribute('data-finding-id');
+            if (fid) {
+                startReviewMode(fid);
+            } else {
+                startReviewMode(parseInt(btn.getAttribute('data-review-idx'), 10));
+            }
+        });
     });
     document.querySelectorAll('.btn-del-single[data-finding-id]').forEach(function (btn) {
         btn.addEventListener('click', function () {
@@ -539,7 +719,7 @@ function bindUi() {
     const btnNextB = document.getElementById('btnNextBottom');
     const btnPrev = document.getElementById('btnPrevTop');
     if (btnNext) btnNext.addEventListener('click', nextReviewFile);
-    if (btnNextB) btnNextB.addEventListener('click', nextReviewFile);
+    if (btnNextB) btnNextB.addEventListener('click', skipAndNext);
     if (btnPrev) btnPrev.addEventListener('click', prevReviewFile);
     const delBtn = document.getElementById('modalDeleteBtn');
     if (delBtn) delBtn.addEventListener('click', deleteAndNext);
@@ -783,12 +963,12 @@ document.addEventListener('keydown', function (e) {
     if (!fvm || !fvm.classList.contains('active') || topModal !== fvm || decisionsLocked) return;
     if (e.code === 'Space') {
         e.preventDefault();
-        nextReviewFile();
+        skipAndNext();
         return;
     }
     if (key === 'c') copyModalContent();
     else if (key === 'd' || e.key === 'Delete') deleteAndNext();
-    else if (key === 'n' || e.key === 'ArrowRight') nextReviewFile();
+    else if (key === 'n' || e.key === 'ArrowRight') skipAndNext();
     else if (key === 'p' || e.key === 'ArrowLeft') prevReviewFile();
     else if (key === 'b') markCleanCurrent();
     else if (key === 'a') askAiCurrent();

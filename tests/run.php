@@ -2468,6 +2468,345 @@ run_test('Gemini key modal: saving a cooling key clears its cooldown immediately
     @rmdir($tempDir);
 });
 
+// -------------------------------------------------------------
+// Review navigation tests
+// -------------------------------------------------------------
+run_test('Review navigation: Store::findFirstUnreviewedIndex correctly calculates initial index', function() {
+    $tempDir = sys_get_temp_dir() . '/zs_nav_' . bin2hex(random_bytes(4));
+    @mkdir($tempDir, 0755, true);
+    $store = new ZS_Store($tempDir);
+
+    // Empty session -> 0
+    $sess = $store->loadSession();
+    assert_equals(0, $store->findFirstUnreviewedIndex($sess), 'Empty session should return 0');
+
+    // 4 items:
+    // 0: QUARANTINED (terminal/reviewed)
+    // 1: FOUND, candidate hash awaiting strike 2 review (reviewed: false) -> MUST land on 1
+    // 2: FOUND, explicitly reviewed: true
+    // 3: FOUND, unreviewed
+    $hashCandidate = hash('sha256', 'candidate_sample');
+    $knowledge = $store->loadKnowledge();
+    $knowledge['candidates'][$hashCandidate] = array(
+        'first_path' => '/var/www/candidate.php',
+        'first_session_id' => 'sess_prev',
+        'first_at' => time()
+    );
+    $store->saveKnowledge($knowledge);
+
+    $sess = array(
+        'scan_session_id' => 'sess_123',
+        'review_cursor'   => 0,
+        'infected_files'  => array(
+            array('finding_id' => 'f0', 'path' => '/var/www/f0.php', 'status' => 'QUARANTINED', 'raw_sha256' => 'h0', 'reason' => 'r'),
+            array('finding_id' => 'f1', 'path' => '/var/www/f1.php', 'status' => 'FOUND', 'raw_sha256' => $hashCandidate, 'reason' => 'r'),
+            array('finding_id' => 'f2', 'path' => '/var/www/f2.php', 'status' => 'FOUND', 'raw_sha256' => 'h2', 'reviewed' => true, 'reason' => 'r'),
+            array('finding_id' => 'f3', 'path' => '/var/www/f3.php', 'status' => 'FOUND', 'raw_sha256' => 'h3', 'reason' => 'r'),
+        )
+    );
+    $store->saveSession($sess);
+
+    // Candidate finding f1 is unreviewed in this session and must not be skipped
+    assert_equals(1, $store->findFirstUnreviewedIndex($sess), 'Should land on candidate finding f1 for 2nd-strike human review');
+
+    // Once f1 is marked reviewed, should skip f0 (quarantined), f1 (reviewed), f2 (reviewed) to land on f3 (index 3)
+    $sess['infected_files'][1]['reviewed'] = true;
+    $store->saveSession($sess);
+    assert_equals(3, $store->findFirstUnreviewedIndex($sess), 'Should skip reviewed items to land on index 3');
+
+    // AI_SKIPPED and AI_ERROR should be recognized as pending human review
+    $sess['infected_files'][3]['status'] = 'AI_SKIPPED';
+    $store->saveSession($sess);
+    assert_equals(3, $store->findFirstUnreviewedIndex($sess), 'AI_SKIPPED finding must be treated as pending human review');
+
+    $sess['infected_files'][3]['status'] = 'AI_ERROR';
+    $store->saveSession($sess);
+    assert_equals(3, $store->findFirstUnreviewedIndex($sess), 'AI_ERROR finding must be treated as pending human review');
+
+    // Now mark f3 as reviewed -> all reviewed! Should gracefully return last item (3)
+    $sess['infected_files'][3]['reviewed'] = true;
+    $store->saveSession($sess);
+    assert_equals(3, $store->findFirstUnreviewedIndex($sess), 'When all items reviewed, should return last item (3) allowing Back navigation');
+
+    // With TRUSTED_HIDDEN item at beginning: visibleIndex must ignore trusted
+    $sess['infected_files'] = array(
+        array('finding_id' => 'f_trusted', 'path' => '/t.php', 'status' => 'TRUSTED_HIDDEN', 'raw_sha256' => 'ht', 'reason' => 'r'),
+        array('finding_id' => 'f0', 'path' => '/var/www/f0.php', 'status' => 'QUARANTINED', 'raw_sha256' => 'h0', 'reason' => 'r'),
+        array('finding_id' => 'f1', 'path' => '/var/www/f1.php', 'status' => 'FOUND', 'raw_sha256' => 'h1', 'reason' => 'r'),
+    );
+    $store->saveSession($sess);
+    // Visible items: f0 (index 0), f1 (index 1). f0 is quarantined, f1 is unreviewed -> should return visible index 1
+    assert_equals(1, $store->findFirstUnreviewedIndex($sess), 'Visible index must ignore TRUSTED_HIDDEN items');
+
+    @unlink($store->getSessionFile());
+    @unlink($store->getKnowledgeFile());
+    @rmdir($tempDir);
+});
+
+run_test('Review navigation: Store::setReviewCursor and getReviewCursor manage session cursor', function() {
+    $tempDir = sys_get_temp_dir() . '/zs_cursor_' . bin2hex(random_bytes(4));
+    @mkdir($tempDir, 0755, true);
+    $store = new ZS_Store($tempDir);
+
+    $sess = array(
+        'scan_session_id' => 'sess_abc',
+        'review_cursor'   => 0,
+        'infected_files'  => array(
+            array('finding_id' => 'f1', 'path' => '/a.php', 'status' => 'FOUND', 'raw_sha256' => 'h1', 'reason' => 'r'),
+            array('finding_id' => 'f2', 'path' => '/b.php', 'status' => 'FOUND', 'raw_sha256' => 'h2', 'reason' => 'r'),
+        )
+    );
+    $store->saveSession($sess);
+    assert_equals(0, $store->getReviewCursor($sess));
+
+    $store->setReviewCursor(1, 'f1');
+    $updated = $store->loadSession();
+    assert_equals(1, $updated['review_cursor'], 'review_cursor should be updated to 1');
+    assert_true(!empty($updated['infected_files'][0]['reviewed']), 'finding f1 should be marked reviewed = true');
+    assert_false(!empty($updated['infected_files'][1]['reviewed']), 'finding f2 should remain unreviewed');
+
+    @unlink($store->getSessionFile());
+    @unlink($store->getKnowledgeFile());
+    @rmdir($tempDir);
+});
+
+run_test('Review navigation: HTTP set_review_cursor action validates session and updates store', function() {
+    $tempDir = sys_get_temp_dir() . '/zs_act_' . bin2hex(random_bytes(4));
+    $rootDir = $tempDir . '/root';
+    $dataDir = $tempDir . '/data';
+    @mkdir($rootDir, 0755, true);
+    @mkdir($dataDir, 0755, true);
+
+    $keyHash = password_hash('TestPass1234', PASSWORD_DEFAULT);
+    ZS_Config::saveConfig(array(
+        'key_hash'    => $keyHash,
+        'csrf_secret' => 'csrf_test_secret_123456',
+    ), $dataDir);
+
+    $store = new ZS_Store($dataDir);
+    $sess = array(
+        'scan_session_id' => 'sid_exact_123',
+        'review_cursor'   => 0,
+        'infected_files'  => array(
+            array('finding_id' => 'find_1', 'path' => $rootDir . '/vuln.php', 'status' => 'FOUND', 'raw_sha256' => 'h1', 'reason' => 'r'),
+        )
+    );
+    $store->saveSession($sess);
+
+    // Mismatched session should fail
+    $resFail = run_zs_test_worker_action($rootDir, $dataDir, array(
+        'do_action'       => 'set_review_cursor',
+        'scan_session_id' => 'wrong_session_id',
+        'finding_id'      => 'find_1',
+        'index'           => 1,
+    ));
+    assert_false(!empty($resFail['success']), 'Mismatch scan_session_id must fail');
+
+    // Matching session should succeed
+    $resOk = run_zs_test_worker_action($rootDir, $dataDir, array(
+        'do_action'       => 'set_review_cursor',
+        'scan_session_id' => 'sid_exact_123',
+        'finding_id'      => 'find_1',
+        'index'           => 1,
+        'skipped'         => '1',
+    ));
+    assert_true(!empty($resOk['success']), 'Valid set_review_cursor must succeed');
+    assert_equals(1, $resOk['review_cursor']);
+
+    $savedSess = $store->loadSession();
+    assert_equals(1, $savedSess['review_cursor']);
+    assert_true(!empty($savedSess['infected_files'][0]['reviewed']), 'find_1 must be marked reviewed');
+
+    @unlink($dataDir . '/config.php');
+    @unlink($store->getSessionFile());
+    @unlink($store->getKnowledgeFile());
+    @rmdir($dataDir);
+    @rmdir($rootDir);
+    @rmdir($tempDir);
+});
+
+run_test('Review navigation: view_file reads quarantined file content from quarantine backup', function() {
+    $tempDir = sys_get_temp_dir() . '/zs_qview_' . bin2hex(random_bytes(4));
+    $rootDir = $tempDir . '/root';
+    $dataDir = $tempDir . '/data';
+    $quarantineDir = $dataDir . '/quarantine';
+    @mkdir($rootDir, 0755, true);
+    @mkdir($dataDir, 0755, true);
+    @mkdir($quarantineDir, 0700, true);
+
+    $keyHash = password_hash('TestPass1234', PASSWORD_DEFAULT);
+    ZS_Config::saveConfig(array(
+        'key_hash'    => $keyHash,
+        'csrf_secret' => 'csrf_test_secret_123456',
+    ), $dataDir);
+
+    $testFile = $rootDir . '/webshell.php';
+    $codePayload = "<?php echo 'malware_payload_test_123'; ?>";
+    file_put_contents($testFile, $codePayload);
+    $rawHash = hash('sha256', $codePayload);
+
+    // Quarantine the file (copies to quarantineDir and unlinks original)
+    $qRes = ZS_Quarantine::copyThenUnlink($testFile, $rootDir, $quarantineDir, array(
+        'finding_id'   => 'fid_quarantined',
+        'expected_raw' => $rawHash,
+    ));
+    assert_true($qRes['success'], 'Quarantine copyThenUnlink must succeed');
+    assert_false(file_exists($testFile), 'Original file must be unlinked after quarantine');
+
+    $store = new ZS_Store($dataDir);
+    $sess = array(
+        'scan_session_id' => 'sid_q_test',
+        'review_cursor'   => 0,
+        'infected_files'  => array(
+            array(
+                'finding_id'   => 'fid_quarantined',
+                'path'         => $testFile,
+                'status'       => 'QUARANTINED',
+                'raw_sha256'   => $rawHash,
+                'reason'       => 'Webshell detected',
+                'backup_name'  => $qRes['backup_name'],
+                'size'         => strlen($codePayload),
+                'reviewed'     => true,
+            ),
+        )
+    );
+    $store->saveSession($sess);
+
+    // Call view_file via worker action
+    $res = run_zs_test_worker_action($rootDir, $dataDir, array(
+        'do_action'       => 'view_file',
+        'scan_session_id' => 'sid_q_test',
+        'finding_id'      => 'fid_quarantined',
+        'expected_raw'    => $rawHash,
+    ));
+    assert_true(!empty($res['success']), 'view_file for quarantined finding must succeed: ' . (isset($res['message']) ? $res['message'] : ''));
+    assert_true(!empty($res['is_quarantined']), 'Response must indicate is_quarantined is true');
+    assert_equals($codePayload, $res['content'], 'view_file must return the original content from the quarantine envelope');
+
+    @unlink($quarantineDir . '/' . $qRes['backup_name']);
+    @unlink($quarantineDir . '/manifest.json');
+    @rmdir($quarantineDir);
+    @unlink($dataDir . '/config.php');
+    @unlink($store->getSessionFile());
+    @unlink($store->getKnowledgeFile());
+    @rmdir($dataDir);
+    @rmdir($rootDir);
+    @rmdir($tempDir);
+});
+
+run_test('Review navigation: Ui::renderReport outputs review_cursor and reviewed flag', function() {
+    $tempDir = sys_get_temp_dir() . '/zs_uireport_' . bin2hex(random_bytes(4));
+    @mkdir($tempDir, 0755, true);
+    $store = new ZS_Store($tempDir);
+
+    $session = array(
+        'scan_session_id'  => 'sess_ui_123',
+        'scanned_files'    => 10,
+        'review_cursor'    => 1,
+        'infected_files'   => array(
+            array('finding_id' => 'f1', 'path' => '/a.php', 'status' => 'QUARANTINED', 'raw_sha256' => 'h1', 'reason' => 'r', 'size' => 10, 'reviewed' => true),
+            array('finding_id' => 'f2', 'path' => '/b.php', 'status' => 'FOUND', 'raw_sha256' => 'h2', 'reason' => 'r', 'size' => 20),
+        ),
+    );
+    $store->saveSession($session);
+    $config = array('key_hash' => 'dummy', 'csrf_secret' => 'dummy');
+
+    ob_start();
+    ZS_Ui::renderReport($session, $tempDir, $tempDir, $config, $store);
+    $html = ob_get_clean();
+
+    assert_true(preg_match('/window\.ZS_BOOT\s*=\s*(\{.*?\});/s', $html, $m) === 1, 'window.ZS_BOOT JSON must be embedded in report');
+    $boot = json_decode($m[1], true);
+    assert_true(is_array($boot), 'Embedded boot must parse as JSON array');
+    assert_equals(1, $boot['review_cursor'], 'review_cursor in boot must point to first unreviewed finding (index 1)');
+    assert_true(!empty($boot['items'][0]['reviewed']), 'f1 in boot items must have reviewed = true');
+    assert_false(!empty($boot['items'][1]['reviewed']), 'f2 in boot items must have reviewed = false');
+
+    @unlink($store->getSessionFile());
+    @unlink($store->getKnowledgeFile());
+    @rmdir($tempDir);
+});
+
+run_test('Review navigation: delete_single and mark_clean update reviewed flag and advance review_cursor', function() {
+    $tempDir = sys_get_temp_dir() . '/zs_act_nav_' . bin2hex(random_bytes(4));
+    $rootDir = $tempDir . '/root';
+    $dataDir = $tempDir . '/data';
+    $quarantineDir = $dataDir . '/quarantine';
+    @mkdir($rootDir, 0755, true);
+    @mkdir($dataDir, 0755, true);
+    @mkdir($quarantineDir, 0700, true);
+
+    $keyHash = password_hash('TestPass1234', PASSWORD_DEFAULT);
+    ZS_Config::saveConfig(array(
+        'key_hash'    => $keyHash,
+        'csrf_secret' => 'csrf_test_secret_123456',
+    ), $dataDir);
+
+    $file1 = $rootDir . '/mal1.php';
+    $file2 = $rootDir . '/mal2.php';
+    $file3 = $rootDir . '/mal3.php';
+    file_put_contents($file1, "<?php echo 'm1'; ?>");
+    file_put_contents($file2, "<?php echo 'm2'; ?>");
+    file_put_contents($file3, "<?php echo 'm3'; ?>");
+    $raw1 = hash('sha256', "<?php echo 'm1'; ?>");
+    $raw2 = hash('sha256', "<?php echo 'm2'; ?>");
+    $raw3 = hash('sha256', "<?php echo 'm3'; ?>");
+
+    $store = new ZS_Store($dataDir);
+    $sess = array(
+        'scan_session_id' => 'sid_nav_flow',
+        'review_cursor'   => 0,
+        'infected_files'  => array(
+            array('finding_id' => 'f1', 'path' => $file1, 'status' => 'FOUND', 'raw_sha256' => $raw1, 'reason' => 'r1'),
+            array('finding_id' => 'f2', 'path' => $file2, 'status' => 'FOUND', 'raw_sha256' => $raw2, 'reason' => 'r2'),
+            array('finding_id' => 'f3', 'path' => $file3, 'status' => 'FOUND', 'raw_sha256' => $raw3, 'reason' => 'r3'),
+        )
+    );
+    $store->saveSession($sess);
+
+    // Delete/quarantine f1
+    $delRes = run_zs_test_worker_action($rootDir, $dataDir, array(
+        'do_action'       => 'delete_single',
+        'scan_session_id' => 'sid_nav_flow',
+        'finding_id'      => 'f1',
+        'expected_raw'    => $raw1,
+    ));
+    assert_true(!empty($delRes['success']), 'delete_single on f1 should succeed');
+
+    $s1 = $store->loadSession();
+    assert_true(!empty($s1['infected_files'][0]['reviewed']), 'f1 must have reviewed = true');
+    assert_equals('QUARANTINED', $s1['infected_files'][0]['status']);
+    assert_equals(1, $s1['review_cursor'], 'review_cursor must advance to f2 (index 1)');
+
+    // Mark clean f2
+    $cleanRes = run_zs_test_worker_action($rootDir, $dataDir, array(
+        'do_action'       => 'mark_clean',
+        'scan_session_id' => 'sid_nav_flow',
+        'finding_id'      => 'f2',
+        'expected_raw'    => $raw2,
+    ));
+    assert_true(!empty($cleanRes['status']), 'mark_clean on f2 should succeed');
+
+    $s2 = $store->loadSession();
+    assert_true(!empty($s2['infected_files'][1]['reviewed']), 'f2 must have reviewed = true');
+    assert_equals(2, $s2['review_cursor'], 'review_cursor must advance to f3 (index 2)');
+
+    @unlink($file2);
+    @unlink($file3);
+    if (!empty($delRes['backup_name'])) {
+        @unlink($quarantineDir . '/' . $delRes['backup_name']);
+    }
+    @unlink($quarantineDir . '/manifest.json');
+    @rmdir($quarantineDir);
+    @unlink($dataDir . '/config.php');
+    @unlink($store->getSessionFile());
+    @unlink($store->getKnowledgeFile());
+    @rmdir($dataDir);
+    @rmdir($rootDir);
+    @rmdir($tempDir);
+});
+
+
 if ($prevEnvKey !== false) {
     putenv('GEMINI_API_KEY=' . $prevEnvKey);
     $_ENV['GEMINI_API_KEY'] = $prevEnvKey;

@@ -104,6 +104,7 @@ class ZS_Store {
             'is_completed'     => false,
             'current_dir'      => $rootDir,
             'auto_review'      => self::defaultAutoReview(),
+            'review_cursor'    => 0,
         );
     }
 
@@ -657,6 +658,67 @@ class ZS_Store {
         $stats['errors'] = $stats['failures'];
         return $stats;
     }
+
+    public function getReviewCursor($session) {
+        if (!is_array($session) || !isset($session['review_cursor'])) {
+            return 0;
+        }
+        return max(0, intval($session['review_cursor']));
+    }
+
+    public function setReviewCursor($index, $findingId = '') {
+        $index = max(0, intval($index));
+        return $this->mutateSession(function ($session) use ($index, $findingId) {
+            if (!is_array($session)) {
+                return false;
+            }
+            $session['review_cursor'] = $index;
+            if ($findingId !== '' && !empty($session['infected_files']) && is_array($session['infected_files'])) {
+                foreach ($session['infected_files'] as $idx => $inf) {
+                    if (isset($inf['finding_id']) && $inf['finding_id'] === $findingId) {
+                        $session['infected_files'][$idx]['reviewed'] = true;
+                        break;
+                    }
+                }
+            }
+            return $session;
+        });
+    }
+
+    public function findFirstUnreviewedIndex($session) {
+        if (!is_array($session) || empty($session['infected_files']) || !is_array($session['infected_files'])) {
+            return 0;
+        }
+
+        $visibleIndex = 0;
+        $firstUnreviewedVisible = -1;
+        $lastVisible = 0;
+
+        foreach ($session['infected_files'] as $idx => $f) {
+            $status = isset($f['status']) ? $f['status'] : 'FOUND';
+            if ($status === 'TRUSTED_HIDDEN' || $status === 'TRUSTED') {
+                continue;
+            }
+            $lastVisible = $visibleIndex;
+            $isReviewed = !empty($f['reviewed']);
+
+            $isTerminalStatus = ($status === 'QUARANTINED' || $status === 'AI_QUARANTINED' ||
+                $status === 'RESTORED' || $status === 'CHANGED_SINCE_SCAN' || $status === 'FAILED_DELETE');
+
+            $isPending = !$isReviewed && !$isTerminalStatus;
+
+            if ($isPending && $firstUnreviewedVisible === -1) {
+                $firstUnreviewedVisible = $visibleIndex;
+            }
+            $visibleIndex++;
+        }
+
+        if ($firstUnreviewedVisible !== -1) {
+            return $firstUnreviewedVisible;
+        }
+        return $lastVisible;
+    }
+
 
     public function recordKeyCooldown($key, $duration = 60) {
         $fp = substr(hash('sha256', (string)$key), 0, 16);

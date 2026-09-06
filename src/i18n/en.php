@@ -186,5 +186,7 @@ return array(
     'toast_rules_sync_failed' => 'Rules sync failed.',
     'toast_rules_updated_simple' => 'Rules successfully updated.',
     'auto_ai_stopped_errors' => 'Auto AI review stopped due to repeated network/server errors.',
-    'auto_ai_auth_expired' => 'Authentication session expired. Please refresh and log in again.'
+    'auto_ai_auth_expired' => 'Authentication session expired. Please refresh and log in again.',
+    'all_items_reviewed' => 'All detected items have been reviewed.'
 );
+

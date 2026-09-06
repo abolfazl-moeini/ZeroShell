@@ -209,6 +209,7 @@ class ZS_Ui {
                 'coverage'       => isset($f['coverage']) ? $f['coverage'] : 'full',
                 'backup_name'    => isset($f['backup_name']) ? $f['backup_name'] : '',
                 'severity'       => isset($f['severity']) ? $f['severity'] : 'suspect',
+                'reviewed'       => !empty($f['reviewed']),
             );
         }
 
@@ -218,6 +219,7 @@ class ZS_Ui {
         foreach (ZS_Config::getGeminiKeys($config) as $k) {
             $maskedKeys[] = ZS_Config::maskSecret($k);
         }
+        $reviewCursor = $store->findFirstUnreviewedIndex($session);
         $boot = array(
             'items' => $infectedJs,
             'csrf' => $csrfToken,
@@ -226,6 +228,7 @@ class ZS_Ui {
             'has_ai' => $hasGeminiKeys,
             'job' => $autoJob,
             'stats' => $stats,
+            'review_cursor' => $reviewCursor,
         );
         ?>
     <script>
@@ -293,7 +296,7 @@ class ZS_Ui {
                         <td class="dir-path"></td>
                         <td class="reason-cell"></td>
                         <td class="action-cell">
-                            <button type="button" class="btn-view-single" data-review-idx="<?php echo intval($row['idx']); ?>"><?php echo htmlspecialchars(ZS_I18n::t('btn_inspect'), ENT_QUOTES, 'UTF-8'); ?></button>
+                            <button type="button" class="btn-view-single" data-finding-id="<?php echo htmlspecialchars($row['finding_id'], ENT_QUOTES, 'UTF-8'); ?>" data-review-idx="<?php echo intval($row['idx']); ?>"><?php echo htmlspecialchars(ZS_I18n::t('btn_inspect'), ENT_QUOTES, 'UTF-8'); ?></button>
                             <button type="button" class="btn-del-single" data-finding-id="<?php echo htmlspecialchars($row['finding_id'], ENT_QUOTES, 'UTF-8'); ?>" data-raw="<?php echo htmlspecialchars($row['raw_sha256'], ENT_QUOTES, 'UTF-8'); ?>"><?php echo htmlspecialchars(ZS_I18n::t('btn_delete'), ENT_QUOTES, 'UTF-8'); ?></button>
                         </td>
                     </tr>
