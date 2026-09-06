@@ -1,4 +1,5 @@
 let currentReviewIndex = 0;
+let reviewCursor = 0;
 let isModalActive = false;
 let autoReviewActive = false;
 let autoReviewPaused = false;
@@ -193,20 +194,41 @@ function saveReviewState(overrides) {
         const key = getReviewStorageKey();
         let state = loadSavedReviewState() || {
             index: currentReviewIndex,
+            sequential_index: currentReviewIndex,
+            review_cursor: reviewCursor,
             modal_open: isModalActive,
+            is_single_inspect: false,
             reviewed_ids: {}
         };
-        state.index = currentReviewIndex;
-        state.modal_open = isModalActive;
-        const cur = currentFile();
-        if (cur) state.finding_id = cur.finding_id;
         if (overrides) {
             for (let k in overrides) {
                 state[k] = overrides[k];
             }
         }
+        if (typeof state.review_cursor === 'number') {
+            reviewCursor = state.review_cursor;
+            if (window.ZS_BOOT) {
+                window.ZS_BOOT.review_cursor = state.review_cursor;
+            }
+        }
         localStorage.setItem(key, JSON.stringify(state));
     } catch (e) {}
+}
+
+function syncReviewCursor(idx, findingId) {
+    if (!window.ZS_SESSION_ID || typeof idx !== 'number') return;
+    postForm({
+        do_action: 'set_review_cursor',
+        finding_id: findingId || '',
+        scan_session_id: window.ZS_SESSION_ID,
+        index: idx
+    }).then(function (data) {
+        if (data && data.success && typeof data.review_cursor === 'number') {
+            if (window.ZS_BOOT) window.ZS_BOOT.review_cursor = data.review_cursor;
+            reviewCursor = Math.max(reviewCursor, data.review_cursor);
+            saveReviewState({ review_cursor: reviewCursor });
+        }
+    }).catch(function () {});
 }
 
 function markItemReviewedInStorage(findingId) {
@@ -215,7 +237,10 @@ function markItemReviewedInStorage(findingId) {
         const key = getReviewStorageKey();
         let state = loadSavedReviewState() || {
             index: currentReviewIndex,
+            sequential_index: currentReviewIndex,
+            review_cursor: reviewCursor,
             modal_open: isModalActive,
+            is_single_inspect: false,
             reviewed_ids: {}
         };
         if (!state.reviewed_ids || typeof state.reviewed_ids !== 'object') {
@@ -244,30 +269,51 @@ function calculateInitialReviewIndex() {
     if (!items.length) return 0;
 
     const saved = loadSavedReviewState();
-    const savedIds = (saved && saved.reviewed_ids) ? saved.reviewed_ids : {};
+    const savedIds = (saved && saved.reviewed_ids && typeof saved.reviewed_ids === 'object')
+        ? saved.reviewed_ids
+        : {};
 
     const firstUnreviewed = items.findIndex(function (item) {
         return !isFindingReviewed(item, savedIds);
     });
 
     if (firstUnreviewed === -1) {
-        return items.length - 1;
+        return -1;
     }
 
-    if (saved && typeof saved.index === 'number' && saved.index >= 0 && saved.index < items.length) {
-        if (!isFindingReviewed(items[saved.index], savedIds)) {
-            return saved.index;
+    let cursorCandidate = 0;
+    if (typeof reviewCursor === 'number' && reviewCursor >= 0) {
+        cursorCandidate = Math.max(cursorCandidate, reviewCursor);
+    }
+    if (saved && typeof saved.review_cursor === 'number' && saved.review_cursor >= 0) {
+        cursorCandidate = Math.max(cursorCandidate, saved.review_cursor);
+    }
+    if (saved && typeof saved.sequential_index === 'number' && saved.sequential_index >= 0) {
+        cursorCandidate = Math.max(cursorCandidate, saved.sequential_index);
+    }
+    if (window.ZS_BOOT && typeof window.ZS_BOOT.review_cursor === 'number' && window.ZS_BOOT.review_cursor >= 0) {
+        cursorCandidate = Math.max(cursorCandidate, window.ZS_BOOT.review_cursor);
+    }
+
+    if (saved && !saved.is_single_inspect && typeof saved.index === 'number' && saved.index >= 0) {
+        cursorCandidate = Math.max(cursorCandidate, saved.index);
+    }
+
+    if (cursorCandidate >= items.length) {
+        cursorCandidate = Math.max(0, items.length - 1);
+    }
+
+    for (let i = cursorCandidate; i < items.length; i++) {
+        if (!isFindingReviewed(items[i], savedIds)) {
+            return i;
         }
     }
 
-    if (window.ZS_BOOT && typeof window.ZS_BOOT.review_cursor === 'number') {
-        const bootIdx = window.ZS_BOOT.review_cursor;
-        if (bootIdx >= 0 && bootIdx < items.length && !isFindingReviewed(items[bootIdx], savedIds)) {
-            return bootIdx;
-        }
+    if (firstUnreviewed >= 0) {
+        return firstUnreviewed;
     }
 
-    return firstUnreviewed;
+    return Math.min(cursorCandidate, items.length - 1);
 }
 
 function updateActiveTableRow() {
@@ -313,31 +359,59 @@ function reviewableItems() {
     });
 }
 
-function startReviewMode(startIndex) {
+function startReviewMode(startIndex, isSingleInspect) {
     const items = window.REVIEW_ITEMS || [];
     if (!items.length) {
         alert(t('no_threats_found'));
         return;
     }
     setDecisionLocked(false);
+    let targetIdx = -1;
     if (typeof startIndex === 'string') {
         const pos = items.findIndex(function (it) { return it.finding_id === startIndex; });
-        currentReviewIndex = pos >= 0 ? pos : calculateInitialReviewIndex();
+        targetIdx = pos >= 0 ? pos : calculateInitialReviewIndex();
     } else if (typeof startIndex === 'number' && startIndex >= 0) {
         let pos = items.findIndex(function (it) { return it.idx === startIndex; });
         if (pos < 0 && startIndex < items.length) {
             pos = startIndex;
         }
-        currentReviewIndex = pos >= 0 ? pos : calculateInitialReviewIndex();
+        targetIdx = pos >= 0 ? pos : calculateInitialReviewIndex();
     } else {
-        currentReviewIndex = calculateInitialReviewIndex();
+        targetIdx = calculateInitialReviewIndex();
+        if (targetIdx === -1) {
+            showToast(t('all_items_reviewed'));
+            return;
+        }
     }
+    if (targetIdx < 0 || targetIdx >= items.length) {
+        targetIdx = 0;
+    }
+    currentReviewIndex = targetIdx;
     lastFocused = document.activeElement;
     const modal = document.getElementById('fileViewerModal');
     if (modal) {
         modal.classList.add('active');
         isModalActive = true;
-        saveReviewState({ modal_open: true, index: currentReviewIndex });
+        if (!isSingleInspect) {
+            reviewCursor = Math.max(reviewCursor, currentReviewIndex);
+            if (window.ZS_BOOT) {
+                window.ZS_BOOT.review_cursor = reviewCursor;
+            }
+            saveReviewState({
+                modal_open: true,
+                index: currentReviewIndex,
+                sequential_index: currentReviewIndex,
+                review_cursor: reviewCursor,
+                is_single_inspect: false
+            });
+            syncReviewCursor(reviewCursor);
+        } else {
+            saveReviewState({
+                modal_open: true,
+                inspect_index: currentReviewIndex,
+                is_single_inspect: true
+            });
+        }
         loadCurrentFile();
         updateActiveTableRow();
         const closeBtn = document.getElementById('btnCloseModal');
@@ -349,7 +423,17 @@ function loadCurrentFile() {
     const items = window.REVIEW_ITEMS || [];
     if (currentReviewIndex < 0 || currentReviewIndex >= items.length) return;
     const file = items[currentReviewIndex];
-    saveReviewState({ index: currentReviewIndex });
+    const saved = loadSavedReviewState();
+    if (saved && saved.is_single_inspect) {
+        saveReviewState({ inspect_index: currentReviewIndex, finding_id: file.finding_id });
+    } else {
+        saveReviewState({
+            index: currentReviewIndex,
+            sequential_index: currentReviewIndex,
+            review_cursor: reviewCursor,
+            finding_id: file.finding_id
+        });
+    }
     updateActiveTableRow();
 
     const progressFill = document.getElementById('reviewProgressFill');
@@ -456,6 +540,17 @@ function nextReviewFile() {
     }
     if (currentReviewIndex < items.length - 1) {
         currentReviewIndex++;
+        reviewCursor = Math.max(reviewCursor, currentReviewIndex);
+        if (window.ZS_BOOT) {
+            window.ZS_BOOT.review_cursor = reviewCursor;
+        }
+        saveReviewState({
+            index: currentReviewIndex,
+            sequential_index: currentReviewIndex,
+            review_cursor: reviewCursor,
+            is_single_inspect: false
+        });
+        syncReviewCursor(reviewCursor);
         loadCurrentFile();
     } else {
         showToast(t('all_items_reviewed'));
@@ -467,6 +562,12 @@ function prevReviewFile() {
     if (decisionsLocked) return;
     if (currentReviewIndex > 0) {
         currentReviewIndex--;
+        const saved = loadSavedReviewState();
+        if (saved && saved.is_single_inspect) {
+            saveReviewState({ inspect_index: currentReviewIndex });
+        } else {
+            saveReviewState({ index: currentReviewIndex, review_cursor: reviewCursor });
+        }
         loadCurrentFile();
     }
 }
@@ -475,7 +576,23 @@ function closeViewModal() {
     const modal = document.getElementById('fileViewerModal');
     if (modal) modal.classList.remove('active');
     isModalActive = false;
-    saveReviewState({ modal_open: false, index: currentReviewIndex });
+    const saved = loadSavedReviewState();
+    if (saved && saved.is_single_inspect) {
+        const resumeIdx = (typeof saved.sequential_index === 'number') ? saved.sequential_index : reviewCursor;
+        saveReviewState({
+            modal_open: false,
+            is_single_inspect: false,
+            index: resumeIdx
+        });
+    } else {
+        saveReviewState({
+            modal_open: false,
+            is_single_inspect: false,
+            index: currentReviewIndex,
+            sequential_index: currentReviewIndex,
+            review_cursor: reviewCursor
+        });
+    }
     updateActiveTableRow();
     if (previewAbort) previewAbort.abort();
     setDecisionLocked(false);
@@ -488,13 +605,28 @@ function skipAndNext() {
     if (!file) return;
     file.reviewed = true;
     markItemReviewedInStorage(file.finding_id);
+    const nextIdx = currentReviewIndex + 1;
+    reviewCursor = Math.max(reviewCursor, nextIdx);
+    if (window.ZS_BOOT) window.ZS_BOOT.review_cursor = reviewCursor;
+    saveReviewState({
+        index: nextIdx,
+        sequential_index: nextIdx,
+        review_cursor: reviewCursor,
+        is_single_inspect: false
+    });
     postForm({
         do_action: 'set_review_cursor',
         finding_id: file.finding_id,
         scan_session_id: file.scan_session_id || window.ZS_SESSION_ID,
         expected_raw: file.raw_sha256,
-        index: currentReviewIndex + 1,
+        index: nextIdx,
         skipped: '1'
+    }).then(function (data) {
+        if (data && data.success && typeof data.review_cursor === 'number') {
+            if (window.ZS_BOOT) window.ZS_BOOT.review_cursor = data.review_cursor;
+            reviewCursor = Math.max(reviewCursor, data.review_cursor);
+            saveReviewState({ review_cursor: reviewCursor, sequential_index: reviewCursor });
+        }
     }).catch(function () {});
     nextReviewFile();
 }
@@ -516,6 +648,11 @@ function deleteAndNext() {
             file.status = 'QUARANTINED';
             file.reviewed = true;
             markItemReviewedInStorage(file.finding_id);
+            if (data && typeof data.review_cursor === 'number') {
+                if (window.ZS_BOOT) window.ZS_BOOT.review_cursor = data.review_cursor;
+                reviewCursor = Math.max(reviewCursor, data.review_cursor);
+                saveReviewState({ review_cursor: reviewCursor, sequential_index: reviewCursor, is_single_inspect: false });
+            }
             const statusEl = document.getElementById('modalFileStatus');
             if (statusEl) {
                 statusEl.textContent = file.status;
@@ -558,6 +695,11 @@ function markCleanCurrent() {
         showToast(data.message);
         file.reviewed = true;
         markItemReviewedInStorage(file.finding_id);
+        if (data && typeof data.review_cursor === 'number') {
+            if (window.ZS_BOOT) window.ZS_BOOT.review_cursor = data.review_cursor;
+            reviewCursor = Math.max(reviewCursor, data.review_cursor);
+            saveReviewState({ review_cursor: reviewCursor, sequential_index: reviewCursor, is_single_inspect: false });
+        }
         if (data.status === 'promoted_to_trusted') {
             const trustedHash = file.raw_sha256;
             window.REVIEW_ITEMS.forEach(function (it) {
@@ -576,6 +718,9 @@ function markCleanCurrent() {
             }
             if (currentReviewIndex >= window.REVIEW_ITEMS.length) {
                 currentReviewIndex = window.REVIEW_ITEMS.length - 1;
+            }
+            if (reviewCursor >= window.REVIEW_ITEMS.length) {
+                reviewCursor = Math.max(0, window.REVIEW_ITEMS.length - 1);
             }
             setDecisionLocked(false);
             loadCurrentFile();
@@ -1187,19 +1332,42 @@ function toggleScanPause() {
 
 function bindUi() {
     fillTableText();
+    if (window.ZS_BOOT && typeof window.ZS_BOOT.review_cursor === 'number') {
+        reviewCursor = window.ZS_BOOT.review_cursor;
+    }
+    const saved = loadSavedReviewState();
+    if (saved && typeof saved.review_cursor === 'number') {
+        reviewCursor = Math.max(reviewCursor, saved.review_cursor);
+    }
+    if (saved && typeof saved.sequential_index === 'number') {
+        reviewCursor = Math.max(reviewCursor, saved.sequential_index);
+    }
     currentReviewIndex = calculateInitialReviewIndex();
+    if (currentReviewIndex < 0) {
+        currentReviewIndex = Math.max(0, (window.REVIEW_ITEMS || []).length - 1);
+    }
+    reviewCursor = Math.max(reviewCursor, currentReviewIndex);
     updateActiveTableRow();
 
-    const saved = loadSavedReviewState();
     if (saved && saved.modal_open && (window.REVIEW_ITEMS || []).length > 0) {
-        startReviewMode();
+        if (saved.is_single_inspect && saved.finding_id) {
+            startReviewMode(saved.finding_id, true);
+        } else if (saved.is_single_inspect && typeof saved.inspect_index === 'number') {
+            startReviewMode(saved.inspect_index, true);
+        } else {
+            startReviewMode(undefined, false);
+        }
     }
 
     document.querySelectorAll('[data-switch-lang]').forEach(function (btn) {
         btn.addEventListener('click', function () { switchLang(btn.getAttribute('data-switch-lang')); });
     });
     const startReview = document.getElementById('btnStartReview');
-    if (startReview) startReview.addEventListener('click', function () { startReviewMode(); });
+    if (startReview) {
+        startReview.addEventListener('click', function () {
+            startReviewMode(undefined, false);
+        });
+    }
     const startAuto = document.getElementById('btnStartAuto');
     if (startAuto) startAuto.addEventListener('click', startAutoAiReview);
 
@@ -1220,9 +1388,9 @@ function bindUi() {
             if (viewBtn) {
                 const fid = viewBtn.getAttribute('data-finding-id');
                 if (fid) {
-                    startReviewMode(fid);
+                    startReviewMode(fid, true);
                 } else {
-                    startReviewMode(parseInt(viewBtn.getAttribute('data-review-idx'), 10));
+                    startReviewMode(parseInt(viewBtn.getAttribute('data-review-idx'), 10), true);
                 }
                 return;
             }
@@ -1239,6 +1407,12 @@ function bindUi() {
                         if (it) {
                             it.status = 'QUARANTINED';
                             it.reviewed = true;
+                            markItemReviewedInStorage(fid);
+                        }
+                        if (data && typeof data.review_cursor === 'number') {
+                            if (window.ZS_BOOT) window.ZS_BOOT.review_cursor = data.review_cursor;
+                            reviewCursor = Math.max(reviewCursor, data.review_cursor);
+                            saveReviewState({ review_cursor: reviewCursor });
                         }
                         const statQuar = document.getElementById('statQuarantined');
                         if (statQuar) {
@@ -1248,6 +1422,18 @@ function bindUi() {
                     }
                 });
                 return;
+            }
+            const tr = e.target.closest('tr');
+            if (tr && !e.target.closest('button') && !e.target.closest('input') && !e.target.closest('a')) {
+                const inspectBtn = tr.querySelector('.btn-view-single');
+                if (inspectBtn) {
+                    const fid = inspectBtn.getAttribute('data-finding-id');
+                    if (fid) {
+                        startReviewMode(fid, true);
+                    } else {
+                        startReviewMode(parseInt(inspectBtn.getAttribute('data-review-idx'), 10), true);
+                    }
+                }
             }
         });
     }

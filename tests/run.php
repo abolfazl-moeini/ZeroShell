@@ -2715,6 +2715,47 @@ run_test('Review navigation: Store::findFirstUnreviewedIndex correctly calculate
     @rmdir($tempDir);
 });
 
+run_test('Review navigation: Store::findNextUnreviewedIndex respects fromIndex and wraps around safely', function() {
+    $tempDir = sys_get_temp_dir() . '/zs_next_idx_' . bin2hex(random_bytes(4));
+    @mkdir($tempDir, 0755, true);
+    $store = new ZS_Store($tempDir);
+
+    $sess = array(
+        'scan_session_id' => 'sess_next',
+        'infected_files'  => array(
+            array('finding_id' => 'f0', 'status' => 'FOUND', 'reviewed' => false),
+            array('finding_id' => 'f1', 'status' => 'QUARANTINED', 'reviewed' => true),
+            array('finding_id' => 'f2', 'status' => 'FOUND', 'reviewed' => false),
+            array('finding_id' => 'f3', 'status' => 'FOUND', 'reviewed' => false),
+        )
+    );
+
+    // fromIndex = 0: finds f0 (index 0)
+    assert_equals(0, $store->findNextUnreviewedIndex($sess, 0));
+
+    // fromIndex = 1: f1 is quarantined, finds f2 (index 2)
+    assert_equals(2, $store->findNextUnreviewedIndex($sess, 1));
+
+    // fromIndex = 2: finds f2 (index 2)
+    assert_equals(2, $store->findNextUnreviewedIndex($sess, 2));
+
+    // fromIndex = 3: finds f3 (index 3)
+    assert_equals(3, $store->findNextUnreviewedIndex($sess, 3));
+
+    // When f2 and f3 are reviewed, fromIndex = 2 wraps back to f0 (index 0)
+    $sess['infected_files'][2]['reviewed'] = true;
+    $sess['infected_files'][3]['reviewed'] = true;
+    assert_equals(0, $store->findNextUnreviewedIndex($sess, 2));
+
+    // When all items are reviewed, returns lastVisible (index 3)
+    $sess['infected_files'][0]['reviewed'] = true;
+    assert_equals(3, $store->findNextUnreviewedIndex($sess, 2));
+
+    @unlink($store->getSessionFile());
+    @unlink($store->getKnowledgeFile());
+    @rmdir($tempDir);
+});
+
 run_test('Review navigation: Store::setReviewCursor and getReviewCursor manage session cursor', function() {
     $tempDir = sys_get_temp_dir() . '/zs_cursor_' . bin2hex(random_bytes(4));
     @mkdir($tempDir, 0755, true);
@@ -3152,6 +3193,342 @@ NODE_SCRIPT;
         assert_equals(0, $nodeCode, 'Node runtime test for deleteAndNext failed: ' . implode("\n", $nodeOut));
         assert_true(in_array('NODE_OK', $nodeOut, true), 'Node test must output NODE_OK');
     }
+});
+
+// -------------------------------------------------------------
+// Review navigation: Sequential review resume & inspect cursor preservation
+// -------------------------------------------------------------
+run_test('Review navigation: Ui::renderReport honors stored review_cursor and actions return cursor', function() {
+    $tempDir = sys_get_temp_dir() . '/zs_seq_cur_' . bin2hex(random_bytes(4));
+    $rootDir = $tempDir . '/root';
+    $dataDir = $tempDir . '/data';
+    $quarantineDir = $dataDir . '/quarantine';
+    @mkdir($rootDir, 0755, true);
+    @mkdir($dataDir, 0755, true);
+    @mkdir($quarantineDir, 0700, true);
+
+    $keyHash = password_hash('TestPass1234', PASSWORD_DEFAULT);
+    ZS_Config::saveConfig(array(
+        'key_hash'    => $keyHash,
+        'csrf_secret' => 'csrf_test_secret_123456',
+    ), $dataDir);
+
+    $file1 = $rootDir . '/f1.php';
+    $file2 = $rootDir . '/f2.php';
+    $file3 = $rootDir . '/f3.php';
+    file_put_contents($file1, "<?php echo '1'; ?>");
+    file_put_contents($file2, "<?php echo '2'; ?>");
+    file_put_contents($file3, "<?php echo '3'; ?>");
+    $raw1 = hash('sha256', "<?php echo '1'; ?>");
+    $raw2 = hash('sha256', "<?php echo '2'; ?>");
+    $raw3 = hash('sha256', "<?php echo '3'; ?>");
+
+    $store = new ZS_Store($dataDir);
+    $session = array(
+        'scan_session_id' => 'sid_seq_flow',
+        'review_cursor'   => 2,
+        'scanned_files'   => 3,
+        'infected_files'  => array(
+            array('finding_id' => 'f1', 'path' => $file1, 'status' => 'FOUND', 'raw_sha256' => $raw1, 'reason' => 'r1', 'size' => 10),
+            array('finding_id' => 'f2', 'path' => $file2, 'status' => 'FOUND', 'raw_sha256' => $raw2, 'reason' => 'r2', 'size' => 10),
+            array('finding_id' => 'f3', 'path' => $file3, 'status' => 'FOUND', 'raw_sha256' => $raw3, 'reason' => 'r3', 'size' => 10),
+        )
+    );
+    $store->saveSession($session);
+
+    // 1. Ui::renderReport should output review_cursor >= 2
+    ob_start();
+    ZS_Ui::renderReport($session, $rootDir, $dataDir, array('key_hash' => $keyHash, 'csrf_secret' => 'csrf_test_secret_123456'), $store);
+    $html = ob_get_clean();
+    assert_true(preg_match('/window\.ZS_BOOT\s*=\s*(\{.*?\});/s', $html, $m) === 1, 'Boot JSON must be present');
+    $boot = json_decode($m[1], true);
+    assert_equals(2, $boot['review_cursor'], 'Boot review_cursor must honor stored review_cursor (2)');
+
+    // 2. delete_single action returns review_cursor in response
+    $delRes = run_zs_test_worker_action($rootDir, $dataDir, array(
+        'do_action'       => 'delete_single',
+        'scan_session_id' => 'sid_seq_flow',
+        'finding_id'      => 'f1',
+        'expected_raw'    => $raw1,
+    ));
+    assert_true(!empty($delRes['success']), 'delete_single should succeed');
+    assert_true(isset($delRes['review_cursor']), 'delete_single response must contain review_cursor');
+
+    // 3. mark_clean action returns review_cursor in response
+    $cleanRes = run_zs_test_worker_action($rootDir, $dataDir, array(
+        'do_action'       => 'mark_clean',
+        'scan_session_id' => 'sid_seq_flow',
+        'finding_id'      => 'f2',
+        'expected_raw'    => $raw2,
+    ));
+    assert_true(!empty($cleanRes['status']), 'mark_clean should succeed');
+    assert_true(isset($cleanRes['review_cursor']), 'mark_clean response must contain review_cursor');
+
+    @unlink($file1);
+    @unlink($file2);
+    @unlink($file3);
+    if (!empty($delRes['backup_name'])) {
+        @unlink($quarantineDir . '/' . $delRes['backup_name']);
+    }
+    @unlink($quarantineDir . '/manifest.json');
+    @rmdir($quarantineDir);
+    @unlink($dataDir . '/config.php');
+    @unlink($store->getSessionFile());
+    @unlink($store->getKnowledgeFile());
+    @rmdir($dataDir);
+    @rmdir($rootDir);
+    @rmdir($tempDir);
+});
+
+run_test('Review navigation: client sequential review resumes correctly after inspect and navigation', function() use ($repoRoot) {
+    $jsPath = $repoRoot . '/src/assets/app.js';
+    assert_true(file_exists($jsPath), 'app.js must exist');
+
+    $nodeBin = trim((string)shell_exec('command -v node'));
+    if ($nodeBin === '') {
+        return;
+    }
+
+    $nodeScript = <<<'NODE_SCRIPT'
+const fs = require('fs');
+const vm = require('vm');
+
+const appJs = process.argv[2];
+const code = fs.readFileSync(appJs, 'utf8');
+
+const elements = {};
+function getEl(id) {
+    if (!elements[id]) {
+        elements[id] = {
+            id,
+            style: {},
+            className: '',
+            classList: {
+                classes: [],
+                add: function(c) { if (!this.contains(c)) this.classes.push(c); },
+                remove: function(c) { this.classes = this.classes.filter(x => x !== c); },
+                contains: function(c) { return this.classes.includes(c); }
+            },
+            textContent: '',
+            disabled: false,
+            setAttribute: () => {},
+            removeAttribute: () => {},
+            getAttribute: () => null,
+            querySelector: () => null,
+            querySelectorAll: () => [],
+            focus: () => {}
+        };
+    }
+    return elements[id];
+}
+
+let fetchResolve;
+let fetchCalls = 0;
+
+const sandbox = {
+    window: { location: { pathname: '/malware-cleaner.php' } },
+    document: {
+        addEventListener: () => {},
+        getElementById: (id) => getEl(id),
+        querySelector: () => null,
+        querySelectorAll: () => [],
+        activeElement: null,
+    },
+    localStorage: {
+        data: {},
+        getItem: function(k) { return this.data[k] || null; },
+        setItem: function(k, v) { this.data[k] = String(v); }
+    },
+    fetch: (url, opts) => {
+        fetchCalls++;
+        let cursorVal = 0;
+        if (opts && opts.body) {
+            if (opts.body.do_action === 'set_review_cursor') {
+                cursorVal = Number(opts.body.index || 0);
+            } else if (opts.body.do_action === 'delete_single') {
+                if (opts.body.finding_id === 'f2') cursorVal = 3;
+                else if (opts.body.finding_id === 'f3') cursorVal = 4;
+                else if (opts.body.finding_id === 'f4') cursorVal = 4;
+                else cursorVal = 3;
+            }
+        }
+        return Promise.resolve({
+            json: () => Promise.resolve({ success: true, content: 'code', message: 'Quarantined', review_cursor: cursorVal })
+        });
+    },
+    setTimeout: setTimeout,
+    clearTimeout: clearTimeout,
+    alert: () => {},
+    FormData: class { append(k, v) { this[k] = v; } },
+    AbortController: class { abort() {} },
+    console: console,
+};
+sandbox.window.window = sandbox.window;
+sandbox.window.document = sandbox.document;
+sandbox.window.localStorage = sandbox.localStorage;
+sandbox.window.fetch = sandbox.fetch;
+sandbox.window.setTimeout = sandbox.setTimeout;
+sandbox.window.FormData = sandbox.FormData;
+sandbox.window.AbortController = sandbox.AbortController;
+
+vm.createContext(sandbox);
+vm.runInContext(code, sandbox);
+
+async function runTest() {
+    sandbox.window.REVIEW_ITEMS = [
+        { finding_id: 'f0', path: '/f0.php', filename: 'f0.php', status: 'FOUND', raw_sha256: 'h0', reason: 'r0' },
+        { finding_id: 'f1', path: '/f1.php', filename: 'f1.php', status: 'FOUND', raw_sha256: 'h1', reason: 'r1' },
+        { finding_id: 'f2', path: '/f2.php', filename: 'f2.php', status: 'FOUND', raw_sha256: 'h2', reason: 'r2' },
+        { finding_id: 'f3', path: '/f3.php', filename: 'f3.php', status: 'FOUND', raw_sha256: 'h3', reason: 'r3' },
+        { finding_id: 'f4', path: '/f4.php', filename: 'f4.php', status: 'FOUND', raw_sha256: 'h4', reason: 'r4' },
+    ];
+    sandbox.window.ZS_BOOT = { review_cursor: 0, session_id: 's1' };
+    sandbox.window.ZS_SESSION_ID = 's1';
+
+    // 1. Initial sequential review start -> opens index 0
+    vm.runInContext('startReviewMode(undefined, false);', sandbox);
+    await new Promise(r => setTimeout(r, 10));
+    let cur = vm.runInContext('currentReviewIndex', sandbox);
+    let curCursor = vm.runInContext('reviewCursor', sandbox);
+    if (cur !== 0) throw new Error('Initial startReviewMode should start at 0, got ' + cur);
+    if (curCursor !== 0) throw new Error('reviewCursor should be 0, got ' + curCursor);
+
+    // 2. User navigates Next twice: index 0 -> 1 -> 2
+    vm.runInContext('nextReviewFile();', sandbox);
+    await new Promise(r => setTimeout(r, 10));
+    vm.runInContext('nextReviewFile();', sandbox);
+    await new Promise(r => setTimeout(r, 10));
+    cur = vm.runInContext('currentReviewIndex', sandbox);
+    curCursor = vm.runInContext('reviewCursor', sandbox);
+    if (cur !== 2) throw new Error('After 2 nextReviewFile calls, currentReviewIndex should be 2, got ' + cur);
+    if (curCursor !== 2) throw new Error('reviewCursor should advance to 2, got ' + curCursor);
+
+    // 3. User closes modal
+    vm.runInContext('closeViewModal();', sandbox);
+    let modalActive = vm.runInContext('isModalActive', sandbox);
+    if (modalActive) throw new Error('Modal should be closed');
+
+    // 4. User inspects specific item f0 (single inspect mode)
+    vm.runInContext('startReviewMode("f0", true);', sandbox);
+    await new Promise(r => setTimeout(r, 10));
+    cur = vm.runInContext('currentReviewIndex', sandbox);
+    curCursor = vm.runInContext('reviewCursor', sandbox);
+    if (cur !== 0) throw new Error('Single inspect should open f0 (index 0), got ' + cur);
+    if (curCursor !== 2) throw new Error('Single inspect must NOT overwrite reviewCursor (expected 2), got ' + curCursor);
+
+    // 5. User closes modal again
+    vm.runInContext('closeViewModal();', sandbox);
+
+    // 6. User clicks "Start Sequential Review" -> MUST RESUME AT 2, NOT 0!
+    vm.runInContext('startReviewMode(undefined, false);', sandbox);
+    await new Promise(r => setTimeout(r, 10));
+    cur = vm.runInContext('currentReviewIndex', sandbox);
+    if (cur !== 2) throw new Error('Start Sequential Review must resume at index 2, but got ' + cur);
+
+    // 7. User navigates Back via Previous button: index 2 -> 1 -> 0
+    vm.runInContext('prevReviewFile();', sandbox);
+    await new Promise(r => setTimeout(r, 10));
+    cur = vm.runInContext('currentReviewIndex', sandbox);
+    if (cur !== 1) throw new Error('prevReviewFile should move to index 1, got ' + cur);
+
+    vm.runInContext('prevReviewFile();', sandbox);
+    await new Promise(r => setTimeout(r, 10));
+    cur = vm.runInContext('currentReviewIndex', sandbox);
+    if (cur !== 0) throw new Error('prevReviewFile should move to index 0, got ' + cur);
+    const prevBtnDisabled = elements['btnPrevTop'] && elements['btnPrevTop'].disabled;
+    if (!prevBtnDisabled) throw new Error('btnPrevTop should be disabled at index 0');
+
+    // 8. User closes modal while viewing index 0
+    vm.runInContext('closeViewModal();', sandbox);
+
+    // 9. User clicks "Start Sequential Review" -> MUST STILL RESUME AT 2!
+    vm.runInContext('startReviewMode(undefined, false);', sandbox);
+    await new Promise(r => setTimeout(r, 10));
+    cur = vm.runInContext('currentReviewIndex', sandbox);
+    if (cur !== 2) throw new Error('Start Sequential Review after Back navigation must resume at index 2, got ' + cur);
+
+    // 10. User quarantines item 2 via deleteAndNext
+    vm.runInContext('deleteAndNext();', sandbox);
+    await new Promise(r => setTimeout(r, 40));
+
+    cur = vm.runInContext('currentReviewIndex', sandbox);
+    curCursor = vm.runInContext('reviewCursor', sandbox);
+    if (cur !== 3) throw new Error('currentReviewIndex should advance to 3 after delete, got ' + cur);
+    if (curCursor !== 3) throw new Error('reviewCursor should be 3, got ' + curCursor);
+
+    // 11. User closes modal, inspects item 1, closes modal, clicks Start Sequential Review -> RESUMES AT 3
+    vm.runInContext('closeViewModal();', sandbox);
+    vm.runInContext('startReviewMode("f1", true);', sandbox);
+    await new Promise(r => setTimeout(r, 10));
+    vm.runInContext('closeViewModal();', sandbox);
+
+    vm.runInContext('startReviewMode(undefined, false);', sandbox);
+    await new Promise(r => setTimeout(r, 10));
+    cur = vm.runInContext('currentReviewIndex', sandbox);
+    if (cur !== 3) throw new Error('Start Sequential Review must resume at index 3, got ' + cur);
+
+    // 12. User inspects f4 (index 4, ahead of cursor 3)
+    vm.runInContext('startReviewMode("f4", true);', sandbox);
+    await new Promise(r => setTimeout(r, 10));
+    cur = vm.runInContext('currentReviewIndex', sandbox);
+    curCursor = vm.runInContext('reviewCursor', sandbox);
+    if (cur !== 4) throw new Error('Inspect f4 should open index 4, got ' + cur);
+    if (curCursor !== 3) throw new Error('Inspect forward item must not advance reviewCursor (expected 3), got ' + curCursor);
+
+    // 13. User closes modal after inspecting f4
+    vm.runInContext('closeViewModal();', sandbox);
+
+    // 14. User clicks "Start Sequential Review" -> MUST STILL RESUME AT 3 (not skip to 4!)
+    vm.runInContext('startReviewMode(undefined, false);', sandbox);
+    await new Promise(r => setTimeout(r, 10));
+    cur = vm.runInContext('currentReviewIndex', sandbox);
+    if (cur !== 3) throw new Error('Start Sequential Review after inspecting f4 must resume at index 3, got ' + cur);
+
+    // 15. User quarantines f3 via deleteAndNext
+    vm.runInContext('deleteAndNext();', sandbox);
+    await new Promise(r => setTimeout(r, 40));
+    cur = vm.runInContext('currentReviewIndex', sandbox);
+    if (cur !== 4) throw new Error('After quarantining f3, should advance to index 4, got ' + cur);
+
+    // 16. User quarantines f4 via deleteAndNext
+    vm.runInContext('deleteAndNext();', sandbox);
+    await new Promise(r => setTimeout(r, 40));
+    modalActive = vm.runInContext('isModalActive', sandbox);
+    if (modalActive) throw new Error('Modal should close after last item is reviewed');
+
+    // 16b. User clicks Start Sequential Review while f0 and f1 were unreviewed -> wraps around to 0
+    vm.runInContext('startReviewMode(undefined, false);', sandbox);
+    await new Promise(r => setTimeout(r, 10));
+    cur = vm.runInContext('currentReviewIndex', sandbox);
+    if (cur !== 0) throw new Error('Start Sequential Review should wrap around to unreviewed f0 (0), got ' + cur);
+    vm.runInContext('closeViewModal();', sandbox);
+
+    // Mark f0 and f1 reviewed to test the all-items-reviewed terminal state
+    sandbox.window.REVIEW_ITEMS[0].reviewed = true;
+    sandbox.window.REVIEW_ITEMS[1].reviewed = true;
+
+    // 17. User clicks Start Sequential Review when all items are reviewed -> modal must NOT open
+    vm.runInContext('startReviewMode(undefined, false);', sandbox);
+    await new Promise(r => setTimeout(r, 10));
+    modalActive = vm.runInContext('isModalActive', sandbox);
+    if (modalActive) throw new Error('Modal must not open when all items are reviewed');
+
+    console.log('NODE_NAV_OK');
+}
+
+runTest().catch(err => {
+    console.error(err);
+    process.exit(1);
+});
+NODE_SCRIPT;
+
+    $tmpScript = tempnam(sys_get_temp_dir(), 'zs_node_seq_') . '.js';
+    file_put_contents($tmpScript, $nodeScript);
+    exec(escapeshellcmd($nodeBin) . ' ' . escapeshellarg($tmpScript) . ' ' . escapeshellarg($jsPath), $nodeOut, $nodeCode);
+    @unlink($tmpScript);
+
+    assert_equals(0, $nodeCode, 'Node runtime test for sequential review resume failed: ' . implode("\n", $nodeOut));
+    assert_true(in_array('NODE_NAV_OK', $nodeOut, true), 'Node test must output NODE_NAV_OK');
 });
 
 // -------------------------------------------------------------

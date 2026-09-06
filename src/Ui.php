@@ -219,7 +219,12 @@ class ZS_Ui {
         foreach (ZS_Config::getGeminiKeys($config) as $k) {
             $maskedKeys[] = ZS_Config::maskSecret($k);
         }
-        $reviewCursor = $store->findFirstUnreviewedIndex($session);
+        $storedCursor = $store->getReviewCursor($session);
+        $reviewCursor = $store->findNextUnreviewedIndex($session, $storedCursor);
+        $maxIdx = max(0, count($infectedJs) - 1);
+        if ($reviewCursor > $maxIdx) {
+            $reviewCursor = $maxIdx;
+        }
         $isCompleted = !empty($session['is_completed']);
         $boot = array(
             'items' => $infectedJs,

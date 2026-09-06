@@ -685,13 +685,15 @@ class ZS_Store {
         });
     }
 
-    public function findFirstUnreviewedIndex($session) {
+    public function findNextUnreviewedIndex($session, $fromIndex = 0) {
         if (!is_array($session) || empty($session['infected_files']) || !is_array($session['infected_files'])) {
             return 0;
         }
 
+        $fromIndex = max(0, intval($fromIndex));
         $visibleIndex = 0;
         $firstUnreviewedVisible = -1;
+        $candidateAtOrAfter = -1;
         $lastVisible = 0;
 
         foreach ($session['infected_files'] as $idx => $f) {
@@ -707,16 +709,28 @@ class ZS_Store {
 
             $isPending = !$isReviewed && !$isTerminalStatus;
 
-            if ($isPending && $firstUnreviewedVisible === -1) {
-                $firstUnreviewedVisible = $visibleIndex;
+            if ($isPending) {
+                if ($firstUnreviewedVisible === -1) {
+                    $firstUnreviewedVisible = $visibleIndex;
+                }
+                if ($visibleIndex >= $fromIndex && $candidateAtOrAfter === -1) {
+                    $candidateAtOrAfter = $visibleIndex;
+                }
             }
             $visibleIndex++;
         }
 
+        if ($candidateAtOrAfter !== -1) {
+            return $candidateAtOrAfter;
+        }
         if ($firstUnreviewedVisible !== -1) {
             return $firstUnreviewedVisible;
         }
         return $lastVisible;
+    }
+
+    public function findFirstUnreviewedIndex($session) {
+        return $this->findNextUnreviewedIndex($session, 0);
     }
 
 

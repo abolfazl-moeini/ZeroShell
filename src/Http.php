@@ -592,10 +592,17 @@ class ZS_Http {
                 'reviewed' => true
             ));
             $sessAfter = $store->loadSession();
+            $newCursor = 0;
             if (is_array($sessAfter)) {
-                $store->setReviewCursor($store->findFirstUnreviewedIndex($sessAfter));
+                $cur = $store->getReviewCursor($sessAfter);
+                $newCursor = $store->findNextUnreviewedIndex($sessAfter, $cur);
+                $store->setReviewCursor($newCursor);
             }
-            self::jsonOk(array('message' => ZS_I18n::t('toast_quarantined'), 'backup_name' => $res['backup_name']));
+            self::jsonOk(array(
+                'message'       => ZS_I18n::t('toast_quarantined'),
+                'backup_name'   => $res['backup_name'],
+                'review_cursor' => $newCursor,
+            ));
         }
         self::jsonFail(500, $res['message']);
     }
@@ -627,15 +634,19 @@ class ZS_Http {
         $res = $store->markClean($resolved['raw'], $resolved['path'], $sid);
         $store->updateInfectedItem($resolved['index'], array('reviewed' => true));
         $sessAfter = $store->loadSession();
+        $newCursor = 0;
         if (is_array($sessAfter)) {
-            $store->setReviewCursor($store->findFirstUnreviewedIndex($sessAfter));
+            $cur = $store->getReviewCursor($sessAfter);
+            $newCursor = $store->findNextUnreviewedIndex($sessAfter, $cur);
+            $store->setReviewCursor($newCursor);
         }
         self::jsonOk(array(
-            'status'  => $res['status'],
-            'message' => ($res['status'] === 'promoted_to_trusted')
+            'status'        => $res['status'],
+            'message'       => ($res['status'] === 'promoted_to_trusted')
                 ? ZS_I18n::t('toast_strike2')
                 : (($res['status'] === 'candidate_added') ? ZS_I18n::t('toast_strike1') : ZS_I18n::t('toast_already_trusted')),
-            'raw_sha256' => $resolved['raw'],
+            'raw_sha256'    => $resolved['raw'],
+            'review_cursor' => $newCursor,
         ));
     }
 
