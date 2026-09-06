@@ -150,6 +150,11 @@ class ZS_Config {
             return false;
         }
         @chmod($path, $mode);
+        if (function_exists('opcache_invalidate')) {
+            @opcache_invalidate($path, true);
+        }
+        clearstatcache(true, $path);
+        clearstatcache(true);
         return true;
     }
 
@@ -565,40 +570,66 @@ class ZS_Config {
         $defaults = self::defaultConfig();
         $configFile = self::getConfigFile($dataDir);
         $config = $defaults;
+        $fileKeysConfigured = false;
+        $fileReportConfigured = false;
         if (file_exists($configFile)) {
             if (!defined('ZS_INTERNAL')) {
                 define('ZS_INTERNAL', true);
             }
+            if (function_exists('opcache_invalidate')) {
+                @opcache_invalidate($configFile, true);
+            }
+            clearstatcache(true, $configFile);
             $loaded = @include $configFile;
             if (is_array($loaded)) {
                 $config = array_merge($defaults, $loaded);
+                if (array_key_exists('gemini_api_keys', $loaded) || array_key_exists('gemini_api_key', $loaded)) {
+                    $fileKeysConfigured = true;
+                }
+                if (!empty($loaded['gemini_api_key']) && empty($loaded['gemini_api_keys'])) {
+                    $config['gemini_api_keys'] = array(trim($loaded['gemini_api_key']));
+                }
+                if (array_key_exists('report_endpoint', $loaded)) {
+                    $fileReportConfigured = true;
+                }
             }
         }
 
+        // Only fall back to environment credentials if not explicitly configured in config.php
         $envKey = getenv('GEMINI_API_KEY');
         $envKeys = getenv('GEMINI_API_KEYS');
-        if (!empty($envKeys)) {
-            $parts = preg_split('/[\r\n,]+/', $envKeys);
-            $clean = array();
-            foreach ($parts as $p) {
-                $p = trim($p);
-                if ($p !== '') {
-                    $clean[] = $p;
+        if (!$fileKeysConfigured) {
+            if (!empty($envKeys)) {
+                $parts = preg_split('/[\r\n,]+/', $envKeys);
+                $clean = array();
+                foreach ($parts as $p) {
+                    $p = trim($p);
+                    if ($p !== '') {
+                        $clean[] = $p;
+                    }
+                }
+                if (!empty($clean)) {
+                    $config['gemini_api_keys'] = $clean;
+                    $config['_keys_from_env'] = true;
+                }
+            } elseif (!empty($envKey)) {
+                $cleanEnvKey = trim($envKey);
+                if ($cleanEnvKey !== '') {
+                    $config['gemini_api_keys'] = array($cleanEnvKey);
+                    $config['_keys_from_env'] = true;
                 }
             }
-            if (!empty($clean)) {
-                $config['gemini_api_keys'] = $clean;
-                $config['_keys_from_env'] = true;
-            }
-        } elseif (!empty($envKey)) {
-            $config['gemini_api_keys'] = array(trim($envKey));
-            $config['_keys_from_env'] = true;
         }
 
         $envReport = getenv('REPORT_ENDPOINT');
-        if (!empty($envReport)) {
-            $config['report_endpoint'] = trim($envReport);
-            $config['_report_from_env'] = true;
+        if (!$fileReportConfigured) {
+            if (!empty($envReport)) {
+                $cleanReport = trim($envReport);
+                if ($cleanReport !== '') {
+                    $config['report_endpoint'] = $cleanReport;
+                    $config['_report_from_env'] = true;
+                }
+            }
         }
 
         $config['data_dir'] = $dataDir;
@@ -615,34 +646,41 @@ class ZS_Config {
         }
 
         $configFile = self::getConfigFile($dataDir);
-        $current = self::loadConfig($dataDir);
-        unset($current['_keys_from_env'], $current['_report_from_env']);
-
-        $fromEnvKeys = !empty($newConfig['_keys_from_env']) || getenv('GEMINI_API_KEYS') || getenv('GEMINI_API_KEY');
-        $fromEnvReport = !empty($newConfig['_report_from_env']) || getenv('REPORT_ENDPOINT');
-        unset($newConfig['_keys_from_env'], $newConfig['_report_from_env']);
-
-        if ($fromEnvKeys && !array_key_exists('gemini_api_keys', $newConfig)) {
-            unset($current['gemini_api_keys']);
+        $current = array();
+        if (file_exists($configFile)) {
+            if (!defined('ZS_INTERNAL')) {
+                define('ZS_INTERNAL', true);
+            }
+            if (function_exists('opcache_invalidate')) {
+                @opcache_invalidate($configFile, true);
+            }
+            clearstatcache(true, $configFile);
+            $loaded = @include $configFile;
+            if (is_array($loaded)) {
+                $current = $loaded;
+            }
         }
-        if ($fromEnvReport && !array_key_exists('report_endpoint', $newConfig)) {
-            unset($current['report_endpoint']);
+
+        unset($current['_keys_from_env'], $current['_report_from_env'], $current['data_dir']);
+        unset($newConfig['_keys_from_env'], $newConfig['_report_from_env'], $newConfig['data_dir']);
+        if (array_key_exists('gemini_api_keys', $newConfig)) {
+            unset($current['gemini_api_key']);
         }
 
         $merged = array_merge($current, $newConfig);
-        unset($merged['_keys_from_env'], $merged['_report_from_env'], $merged['data_dir']);
-
-        if ($fromEnvKeys && !array_key_exists('gemini_api_keys', $newConfig)) {
-            unset($merged['gemini_api_keys']);
-        }
-        if ($fromEnvReport && !array_key_exists('report_endpoint', $newConfig)) {
-            unset($merged['report_endpoint']);
-        }
 
         $content = "<?php\n"
             . "if (!defined('ZS_INTERNAL')) { http_response_code(403); header('Cache-Control: no-store'); exit('Access Denied'); }\n"
             . "return " . var_export($merged, true) . ";\n";
-        return self::atomicWrite($configFile, $content, 0600);
+        $ok = self::atomicWrite($configFile, $content, 0600);
+        if ($ok) {
+            if (function_exists('opcache_invalidate')) {
+                @opcache_invalidate($configFile, true);
+            }
+            clearstatcache(true, $configFile);
+            clearstatcache(true);
+        }
+        return $ok;
     }
 
     public static function maskSecret($secret) {
@@ -658,10 +696,35 @@ class ZS_Config {
     }
 
     public static function getGeminiKeys($config) {
-        $keys = isset($config['gemini_api_keys']) && is_array($config['gemini_api_keys'])
-            ? $config['gemini_api_keys']
-            : array();
-        return array_values(array_filter(array_map('trim', $keys)));
+        if (!is_array($config)) {
+            return array();
+        }
+        $raw = array();
+        if (!empty($config['gemini_api_keys'])) {
+            $raw = $config['gemini_api_keys'];
+        } elseif (!empty($config['gemini_api_key'])) {
+            $raw = $config['gemini_api_key'];
+        } elseif (isset($config['gemini_api_keys'])) {
+            $raw = $config['gemini_api_keys'];
+        }
+        if (is_string($raw)) {
+            $raw = preg_split('/[\r\n,]+/', $raw);
+        }
+        if (!is_array($raw)) {
+            return array();
+        }
+        $clean = array();
+        foreach ($raw as $k) {
+            $t = trim((string)$k);
+            $t = trim($t, " \t\n\r\0\x0B\"'");
+            if (preg_match('/^(?:gemini_api_keys?|api_key)\s*[:=]\s*(.+)$/i', $t, $pm)) {
+                $t = trim($pm[1], " \t\n\r\0\x0B\"'");
+            }
+            if ($t !== '' && strpos($t, '•') === false && strpos($t, '*') === false && !in_array($t, $clean, true)) {
+                $clean[] = $t;
+            }
+        }
+        return $clean;
     }
 
     public static function getActiveGeminiKey(&$config, $dataDir = null) {

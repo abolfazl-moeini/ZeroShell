@@ -469,7 +469,14 @@ class ZS_Http {
                 self::actionShareBundle($rootDir, $config, $store, $quarantineDir);
                 break;
             case 'test_gemini':
-                self::jsonOk(ZS_Gemini::ping($config));
+                $testConfig = ZS_Config::loadConfig($dataDir);
+                if (!empty($_POST['gemini_api_keys'])) {
+                    $candidateKeys = ZS_Config::getGeminiKeys(array('gemini_api_keys' => $_POST['gemini_api_keys']));
+                    if (!empty($candidateKeys)) {
+                        $testConfig['gemini_api_keys'] = $candidateKeys;
+                    }
+                }
+                self::jsonOk(ZS_Gemini::ping($testConfig));
                 break;
             case 'scan_batch':
                 self::actionScanBatch($rootDir, $dataDir, $config, $store);
@@ -641,33 +648,42 @@ class ZS_Http {
             }
             $updates['key_hash'] = password_hash($newKey, PASSWORD_DEFAULT);
         }
+        $submittedKeys = array();
         if (isset($_POST['gemini_api_keys']) && trim((string)$_POST['gemini_api_keys']) !== '') {
             $rawKeys = preg_split('/[\r\n,]+/', $_POST['gemini_api_keys']);
-            $submittedKeys = array();
             foreach ($rawKeys as $k) {
-                $t = trim($k);
-                if ($t !== '' && !in_array($t, $submittedKeys, true)) {
+                $t = trim((string)$k);
+                $t = trim($t, " \t\n\r\0\x0B\"'");
+                if (preg_match('/^(?:gemini_api_keys?|api_key)\s*[:=]\s*(.+)$/i', $t, $pm)) {
+                    $t = trim($pm[1], " \t\n\r\0\x0B\"'");
+                }
+                if ($t !== '' && strpos($t, '•') === false && strpos($t, '*') === false && !in_array($t, $submittedKeys, true)) {
                     $submittedKeys[] = $t;
                 }
             }
-            if (!empty($_POST['append_gemini_keys'])) {
-                $keys = ZS_Config::getGeminiKeys($config);
-                foreach ($submittedKeys as $sk) {
-                    if (!in_array($sk, $keys, true)) {
-                        $keys[] = $sk;
+            if (!empty($submittedKeys)) {
+                if (!empty($_POST['append_gemini_keys'])) {
+                    // Do not copy environment-supplied keys into persistent configuration
+                    $currentConfig = ZS_Config::loadConfig($dataDir);
+                    $existingKeys = empty($currentConfig['_keys_from_env']) ? ZS_Config::getGeminiKeys($currentConfig) : array();
+                    $keys = $existingKeys;
+                    foreach ($submittedKeys as $sk) {
+                        if (!in_array($sk, $keys, true)) {
+                            $keys[] = $sk;
+                        }
                     }
+                } else {
+                    $keys = $submittedKeys;
                 }
-            } else {
-                $keys = $submittedKeys;
-            }
-            if (!empty($keys)) {
-                $updates['gemini_api_keys'] = $keys;
-                foreach ($submittedKeys as $sk) {
-                    ZS_Config::clearKeyCooldown($sk, $config, $dataDir);
+                if (!empty($keys)) {
+                    $updates['gemini_api_keys'] = $keys;
+                    foreach ($submittedKeys as $sk) {
+                        ZS_Config::clearKeyCooldown($sk, $config, $dataDir);
+                    }
                 }
             }
         }
-        if (!empty($_POST['clear_gemini_keys'])) {
+        if (!empty($_POST['clear_gemini_keys']) && empty($submittedKeys)) {
             $updates['gemini_api_keys'] = array();
         }
         if (!empty($_POST['gemini_model'])) {
@@ -686,6 +702,10 @@ class ZS_Http {
             self::jsonFail(500, 'Could not save settings.');
         }
         $savedConfig = ZS_Config::loadConfig($dataDir);
+        if (!empty($updates['key_hash']) && !empty($savedConfig['csrf_secret'])) {
+            self::setAuthCookie($savedConfig['csrf_secret'], $updates['key_hash']);
+            self::setCsrfCookie($savedConfig['csrf_secret'], self::currentSessionToken());
+        }
         $savedKeys = ZS_Config::getGeminiKeys($savedConfig);
         self::jsonOk(array(
             'message'    => ZS_I18n::t('settings_saved'),

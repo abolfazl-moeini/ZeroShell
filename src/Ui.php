@@ -411,11 +411,14 @@ class ZS_Ui {
                 <form id="formSettings">
                     <div class="form-group">
                         <label><?php echo htmlspecialchars(ZS_I18n::t('settings_new_key'), ENT_QUOTES, 'UTF-8'); ?></label>
-                        <input type="password" id="set_new_access_key" class="form-input">
+                        <input type="password" id="set_new_access_key" class="form-input" autocomplete="new-password" placeholder="••••••••••••" readonly onfocus="this.removeAttribute('readonly');">
                     </div>
                     <div class="form-group">
                         <label><?php echo htmlspecialchars(ZS_I18n::t('settings_gemini_keys'), ENT_QUOTES, 'UTF-8'); ?></label>
-                        <p style="font-size:12px;color:#94a3b8;"><?php echo htmlspecialchars(implode(' ', $maskedKeys) ?: ZS_I18n::t('settings_no_keys'), ENT_QUOTES, 'UTF-8'); ?></p>
+                        <p style="font-size:12px;color:#94a3b8;margin-bottom:6px;">
+                            <?php echo htmlspecialchars(implode(' ', $maskedKeys) ?: ZS_I18n::t('settings_no_keys'), ENT_QUOTES, 'UTF-8'); ?>
+                            &bull; <a href="https://aistudio.google.com/api-keys" target="_blank" rel="noopener noreferrer" style="color:#38bdf8;text-decoration:underline;"><?php echo htmlspecialchars(ZS_I18n::t('gemini_key_get_link'), ENT_QUOTES, 'UTF-8'); ?> &rarr;</a>
+                        </p>
                         <textarea id="set_gemini_api_keys" class="form-textarea" placeholder="<?php echo htmlspecialchars(ZS_I18n::t('settings_keys_placeholder'), ENT_QUOTES, 'UTF-8'); ?>"></textarea>
                         <label style="font-size:12px;"><input type="checkbox" id="chkClearKeys"> <?php echo htmlspecialchars(ZS_I18n::t('settings_clear_keys'), ENT_QUOTES, 'UTF-8'); ?></label>
                     </div>
@@ -476,7 +479,10 @@ class ZS_Ui {
                 <button type="button" class="modal-close" id="btnCloseGeminiKeyModal">&times;</button>
             </div>
             <div class="modal-body-standard">
-                <p id="geminiKeyModalDesc"><?php echo htmlspecialchars(ZS_I18n::t('gemini_key_modal_desc'), ENT_QUOTES, 'UTF-8'); ?></p>
+                <p id="geminiKeyModalDesc">
+                    <?php echo htmlspecialchars(ZS_I18n::t('gemini_key_modal_desc'), ENT_QUOTES, 'UTF-8'); ?>
+                    <a href="https://aistudio.google.com/api-keys" target="_blank" rel="noopener noreferrer" style="color:#38bdf8;text-decoration:underline;display:inline-block;margin-top:6px;"><?php echo htmlspecialchars(ZS_I18n::t('gemini_key_get_link'), ENT_QUOTES, 'UTF-8'); ?> &rarr;</a>
+                </p>
                 <div id="geminiKeyRateLimitNotice" style="display:none;background:#450a0a;border:1px solid #b91c1c;color:#fecaca;padding:10px 12px;border-radius:6px;margin-bottom:14px;font-size:13px;line-height:1.5;">
                     <?php echo htmlspecialchars(ZS_I18n::t('gemini_key_ratelimit_notice'), ENT_QUOTES, 'UTF-8'); ?>
                 </div>

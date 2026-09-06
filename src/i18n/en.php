@@ -90,6 +90,7 @@ return array(
     'gemini_key_modal_title' => 'Google Gemini API Key Required',
     'gemini_key_ratelimit_title' => 'Gemini Rate Limit Reached',
     'gemini_key_modal_desc' => 'To analyze files with AI, provide one or more Google Gemini API keys. Keys are stored securely in your server configuration.',
+    'gemini_key_get_link' => 'Get a free API key at Google AI Studio',
     'gemini_key_ratelimit_notice' => 'All configured Gemini API keys are currently rate-limited or quota-exhausted. Enter an additional API key to continue immediately.',
     'gemini_key_input_label' => 'Gemini API Key(s)',
     'gemini_key_hint' => 'You can provide multiple keys (one per line or comma-separated) for automatic failover pooling.',

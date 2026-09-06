@@ -2395,6 +2395,9 @@ run_test('Gemini key modal: UI renders geminiKeyModal and bilingual i18n complet
     assert_true(strpos($html, 'id="btnSaveGeminiKeyModal"') !== false, 'HTML must contain btnSaveGeminiKeyModal');
     assert_true(strpos($html, 'id="btnStartAuto"') !== false, 'HTML must contain btnStartAuto');
     assert_true(strpos($html, 'id="modalAskAiBtn"') !== false, 'HTML must contain modalAskAiBtn');
+    assert_true(strpos($html, 'https://aistudio.google.com/api-keys') !== false, 'HTML must contain link to aistudio.google.com/api-keys');
+    assert_true(strpos($html, 'target="_blank"') !== false, 'link must have target=_blank');
+    assert_true(strpos($html, 'rel="noopener noreferrer"') !== false, 'link must have rel=noopener noreferrer');
 
     // Check that required i18n keys are loaded
     $allEn = ZS_I18n::getAll();
@@ -2402,6 +2405,7 @@ run_test('Gemini key modal: UI renders geminiKeyModal and bilingual i18n complet
         'gemini_key_modal_title',
         'gemini_key_ratelimit_title',
         'gemini_key_modal_desc',
+        'gemini_key_get_link',
         'gemini_key_ratelimit_notice',
         'gemini_key_input_label',
         'gemini_key_hint',
@@ -2463,6 +2467,174 @@ run_test('Gemini key modal: saving a cooling key clears its cooldown immediately
 
     @unlink($dataDir . '/config.php');
     @unlink($dataDir . '/cooldowns.php');
+    @rmdir($dataDir);
+    @rmdir($rootDir);
+    @rmdir($tempDir);
+});
+
+run_test('Gemini key modal: user saved keys take precedence over environment variables and are preserved across settings edits', function () {
+    $tempDir = sys_get_temp_dir() . '/zs_env_prec_' . bin2hex(random_bytes(4));
+    $rootDir = $tempDir . '/site';
+    $dataDir = $tempDir . '/data';
+    @mkdir($rootDir, 0755, true);
+    @mkdir($dataDir, 0755, true);
+
+    $origEnvKey = getenv('GEMINI_API_KEY');
+    putenv('GEMINI_API_KEY=env_bad_dummy_key_123');
+    $_ENV['GEMINI_API_KEY'] = 'env_bad_dummy_key_123';
+
+    // 1. Initial config with no keys saved in config.php: loadConfig falls back to env
+    $keyHash = password_hash('SecretPass1234', PASSWORD_DEFAULT);
+    ZS_Config::saveConfig(array(
+        'key_hash'    => $keyHash,
+        'csrf_secret' => 'csrf_secret_abcdef123456',
+    ), $dataDir);
+
+    $cfgInitial = ZS_Config::loadConfig($dataDir);
+    assert_equals(array('env_bad_dummy_key_123'), $cfgInitial['gemini_api_keys'], 'initial config falls back to env when unset in config.php');
+
+    // 2. User explicitly saves their key via save_settings: user key takes precedence
+    $mockSetEnv = 'putenv("GEMINI_API_KEY=env_bad_dummy_key_123"); $_ENV["GEMINI_API_KEY"] = "env_bad_dummy_key_123";';
+    $resSave = run_zs_test_worker_action($rootDir, $dataDir, array(
+        'do_action'       => 'save_settings',
+        'gemini_api_keys' => 'user_real_key_456',
+    ), $mockSetEnv);
+    assert_true(!empty($resSave['success']), 'save_settings with real key must succeed');
+
+    $cfgAfterSave = ZS_Config::loadConfig($dataDir);
+    assert_equals(array('user_real_key_456'), $cfgAfterSave['gemini_api_keys'], 'user saved key must take precedence over env variable');
+
+    // 3. User saves settings updating only gemini_model: saved keys must NOT be wiped
+    $resModel = run_zs_test_worker_action($rootDir, $dataDir, array(
+        'do_action'    => 'save_settings',
+        'gemini_model' => 'gemini-1.5-pro',
+    ), $mockSetEnv);
+    assert_true(!empty($resModel['success']), 'updating model must succeed');
+
+    $cfgAfterModel = ZS_Config::loadConfig($dataDir);
+    assert_equals('gemini-1.5-pro', $cfgAfterModel['gemini_model'], 'model must be updated');
+    assert_equals(array('user_real_key_456'), $cfgAfterModel['gemini_api_keys'], 'stored keys must not be wiped when saving other settings');
+
+    // 4. User explicitly clears keys: clear_gemini_keys must persist and not revert to env
+    $resClear = run_zs_test_worker_action($rootDir, $dataDir, array(
+        'do_action'         => 'save_settings',
+        'clear_gemini_keys' => '1',
+    ), $mockSetEnv);
+    assert_true(!empty($resClear['success']), 'clear_gemini_keys must succeed');
+
+    $cfgAfterClear = ZS_Config::loadConfig($dataDir);
+    assert_equals(array(), ZS_Config::getGeminiKeys($cfgAfterClear), 'cleared keys must remain empty and not revert to env');
+
+    // Restore env
+    if ($origEnvKey !== false) {
+        putenv('GEMINI_API_KEY=' . $origEnvKey);
+        $_ENV['GEMINI_API_KEY'] = $origEnvKey;
+    } else {
+        putenv('GEMINI_API_KEY');
+        unset($_ENV['GEMINI_API_KEY']);
+    }
+
+    @unlink($dataDir . '/config.php');
+    @rmdir($dataDir);
+    @rmdir($rootDir);
+    @rmdir($tempDir);
+});
+
+run_test('Gemini key modal: masked keys filtering, getGeminiKeys string parsing, and app.js client functions', function () {
+    $tempDir = sys_get_temp_dir() . '/zs_masked_' . bin2hex(random_bytes(4));
+    $rootDir = $tempDir . '/site';
+    $dataDir = $tempDir . '/data';
+    @mkdir($rootDir, 0755, true);
+    @mkdir($dataDir, 0755, true);
+
+    $keyHash = password_hash('SecretPass1234', PASSWORD_DEFAULT);
+    ZS_Config::saveConfig(array(
+        'key_hash'        => $keyHash,
+        'csrf_secret'     => 'csrf_secret_abcdef123456',
+        'gemini_api_keys' => array('valid_key_one'),
+    ), $dataDir);
+
+    // 1. Submitting masked key (containing bullet • or *) must NOT overwrite valid key
+    $resMasked = run_zs_test_worker_action($rootDir, $dataDir, array(
+        'do_action'       => 'save_settings',
+        'gemini_api_keys' => 'valid••••••••one',
+    ));
+    assert_true(!empty($resMasked['success']), 'masked save_settings must succeed safely');
+    $cfgMasked = ZS_Config::loadConfig($dataDir);
+    assert_equals(array('valid_key_one'), $cfgMasked['gemini_api_keys'], 'masked key submission must not corrupt stored keys');
+
+    // 2. Test ZS_Config::getGeminiKeys parsing strings, quotes, prefixes and filtering
+    $parsedString = ZS_Config::getGeminiKeys(array('gemini_api_keys' => "k1, k2\nk3, k1"));
+    assert_equals(array('k1', 'k2', 'k3'), $parsedString, 'getGeminiKeys must parse string and deduplicate');
+
+    $parsedQuoted = ZS_Config::getGeminiKeys(array('gemini_api_keys' => "\"AIzaQuoted1\", 'AIzaQuoted2', GEMINI_API_KEY=AIzaPrefixed"));
+    assert_equals(array('AIzaQuoted1', 'AIzaQuoted2', 'AIzaPrefixed'), $parsedQuoted, 'getGeminiKeys must strip surrounding quotes and key prefixes');
+
+    $parsedMasked = ZS_Config::getGeminiKeys(array('gemini_api_keys' => array('AIza••••••••OmY', 'real_key')));
+    assert_equals(array('real_key'), $parsedMasked, 'getGeminiKeys must filter out masked keys');
+
+    // 3. Verify singular gemini_api_key compatibility in loadConfig and migration in saveConfig
+    $tempSingular = sys_get_temp_dir() . '/zs_sing_' . bin2hex(random_bytes(4));
+    @mkdir($tempSingular, 0755, true);
+    ZS_Config::saveConfig(array(
+        'key_hash'       => $keyHash,
+        'csrf_secret'    => 'csrf_secret_abcdef123456',
+        'gemini_api_key' => 'singular_legacy_key',
+    ), $tempSingular);
+
+    $origSingEnv = getenv('GEMINI_API_KEY');
+    putenv('GEMINI_API_KEY=env_should_not_override_singular');
+    $_ENV['GEMINI_API_KEY'] = 'env_should_not_override_singular';
+
+    $cfgSing = ZS_Config::loadConfig($tempSingular);
+    assert_equals(array('singular_legacy_key'), ZS_Config::getGeminiKeys($cfgSing), 'singular gemini_api_key in config must prevent env override');
+
+    ZS_Config::saveConfig(array(
+        'gemini_api_keys' => array('migrated_plural_key'),
+    ), $tempSingular);
+    $cfgMigrated = ZS_Config::loadConfig($tempSingular);
+    assert_equals(array('migrated_plural_key'), $cfgMigrated['gemini_api_keys'], 'plural keys must update properly');
+    assert_true(!isset($cfgMigrated['gemini_api_key']), 'legacy singular gemini_api_key must be unset after saving plural keys');
+
+    if ($origSingEnv !== false) {
+        putenv('GEMINI_API_KEY=' . $origSingEnv);
+        $_ENV['GEMINI_API_KEY'] = $origSingEnv;
+    } else {
+        putenv('GEMINI_API_KEY');
+        unset($_ENV['GEMINI_API_KEY']);
+    }
+    @unlink($tempSingular . '/config.php');
+    @rmdir($tempSingular);
+
+    // 4. Verify save_settings updating new_access_key updates key_hash
+    $resNewPass = run_zs_test_worker_action($rootDir, $dataDir, array(
+        'do_action'      => 'save_settings',
+        'new_access_key' => 'BrandNewPassword123456',
+    ));
+    assert_true(!empty($resNewPass['success']), 'changing access key to 12+ chars must succeed');
+    $cfgNewPass = ZS_Config::loadConfig($dataDir);
+    assert_true(password_verify('BrandNewPassword123456', $cfgNewPass['key_hash']), 'new password hash must verify with new password');
+
+    // 5. Verify test_gemini accepts keys from POST to test before saving
+    $mockPingCapture = 'ZS_Gemini::$http = function ($url, $headers, $payloadJson, $method) {
+        return array(
+            "status" => 200,
+            "body" => json_encode(array("candidates" => array(array("content" => array("parts" => array(array("text" => "pong"))))))),
+        );
+    };';
+    $resTestG = run_zs_test_worker_action($rootDir, $dataDir, array(
+        'do_action'       => 'test_gemini',
+        'gemini_api_keys' => 'custom_unsaved_ping_key',
+    ), $mockPingCapture);
+    assert_true(!empty($resTestG['success']), 'test_gemini with posted keys must succeed');
+
+    // 6. Verify app.js contains saveGeminiKeyModal and askAiFile
+    $jsContent = file_get_contents(dirname(dirname(__FILE__)) . '/src/assets/app.js');
+    assert_true(strpos($jsContent, 'function saveGeminiKeyModal') !== false, 'app.js must define saveGeminiKeyModal function');
+    assert_true(strpos($jsContent, 'window.saveGeminiKeyModal') !== false, 'app.js must expose window.saveGeminiKeyModal');
+    assert_true(strpos($jsContent, 'window.askAiFile') !== false, 'app.js must expose window.askAiFile');
+
+    @unlink($dataDir . '/config.php');
     @rmdir($dataDir);
     @rmdir($rootDir);
     @rmdir($tempDir);

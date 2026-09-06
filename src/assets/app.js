@@ -630,6 +630,67 @@ function closeGeminiKeyModal() {
     pendingAiCallback = null;
 }
 
+function saveGeminiKeyModal(e) {
+    if (e && e.preventDefault) e.preventDefault();
+    const input = document.getElementById('modal_gemini_api_keys');
+    const val = input ? input.value.trim() : '';
+    const validKeys = val.split(/[\r\n,]+/).map(function (s) {
+        let clean = s.trim().replace(/^['"]+|['"]+$/g, '');
+        const matchPrefix = clean.match(/^(?:gemini_api_keys?|api_key)\s*[:=]\s*(.+)$/i);
+        if (matchPrefix) clean = matchPrefix[1].trim().replace(/^['"]+|['"]+$/g, '');
+        return clean;
+    }).filter(function (s) {
+        return s !== '' && s.indexOf('•') === -1 && s.indexOf('*') === -1;
+    });
+    if (validKeys.length === 0) {
+        alert(t('gemini_key_required_prompt'));
+        return;
+    }
+    const saveBtn = document.getElementById('btnSaveGeminiKeyModal');
+    if (saveBtn) saveBtn.disabled = true;
+
+    const postData = {
+        do_action: 'save_settings',
+        gemini_api_keys: validKeys.join("\n"),
+    };
+    if (isKeyModalRateLimit) {
+        postData.append_gemini_keys = '1';
+    }
+
+    return postForm(postData).then(function (data) {
+        if (saveBtn) saveBtn.disabled = false;
+        if (data && data.success) {
+            const hasAi = (typeof data.has_ai !== 'undefined') ? !!data.has_ai : (validKeys.length > 0);
+            if (window.ZS_BOOT) {
+                window.ZS_BOOT.has_ai = hasAi;
+            }
+            window.CONFIG = window.CONFIG || {};
+            window.CONFIG.has_ai = hasAi;
+
+            const askBtn = document.getElementById('modalAskAiBtn');
+            if (askBtn && hasAi) askBtn.disabled = false;
+            const autoBtn = document.getElementById('btnStartAuto');
+            if (autoBtn && hasAi) autoBtn.disabled = false;
+
+            const cb = pendingAiCallback;
+            closeGeminiKeyModal();
+            showToast(data.message || t('settings_saved'));
+            if (hasAi && typeof cb === 'function') {
+                cb();
+            }
+            return data;
+        } else {
+            alert((data && data.message) || t('err_ai_failed'));
+            return data;
+        }
+    }).catch(function (err) {
+        if (saveBtn) saveBtn.disabled = false;
+        alert((err && err.message) || t('err_ai_failed'));
+    });
+}
+window.saveGeminiKeyModal = saveGeminiKeyModal;
+window.askAiFile = askAiCurrent;
+
 function askAiCurrent() {
     const file = currentFile();
     if (!file) return;
@@ -1239,65 +1300,56 @@ function bindUi() {
     const form = document.getElementById('formSettings');
     if (form) form.addEventListener('submit', function (e) {
         e.preventDefault();
-        postForm({
+        const keysInput = document.getElementById('set_gemini_api_keys');
+        const keysVal = keysInput ? keysInput.value.trim() : '';
+        const chkClear = document.getElementById('chkClearKeys');
+        const isClear = chkClear && chkClear.checked;
+        const newKeyInput = document.getElementById('set_new_access_key');
+        const newKeyVal = newKeyInput ? newKeyInput.value.trim() : '';
+
+        const postData = {
             do_action: 'save_settings',
-            new_access_key: document.getElementById('set_new_access_key').value,
-            gemini_api_keys: document.getElementById('set_gemini_api_keys').value,
-            gemini_model: document.getElementById('set_gemini_model').value,
-            github_repo: document.getElementById('set_github_repo').value,
+            gemini_api_keys: keysVal,
+            gemini_model: document.getElementById('set_gemini_model') ? document.getElementById('set_gemini_model').value : '',
+            github_repo: document.getElementById('set_github_repo') ? document.getElementById('set_github_repo').value : '',
             rules_sync_url: document.getElementById('set_rules_sync_url') ? document.getElementById('set_rules_sync_url').value : '',
-            clear_gemini_keys: document.getElementById('chkClearKeys').checked ? '1' : '',
-        }).then(function (data) {
-            showToast(data.message || '');
-            if (data.success) setTimeout(function () { window.location.reload(); }, 600);
+            clear_gemini_keys: isClear ? '1' : '',
+        };
+        if (newKeyVal !== '') {
+            postData.new_access_key = newKeyVal;
+        }
+
+        postForm(postData).then(function (data) {
+            if (data && data.success) {
+                if (window.ZS_BOOT && typeof data.has_ai !== 'undefined') {
+                    window.ZS_BOOT.has_ai = !!data.has_ai;
+                }
+                window.CONFIG = window.CONFIG || {};
+                if (typeof data.has_ai !== 'undefined') {
+                    window.CONFIG.has_ai = !!data.has_ai;
+                }
+                showToast(data.message || t('settings_saved'));
+                setTimeout(function () { window.location.reload(); }, 600);
+            } else {
+                alert((data && data.message) || t('err_ai_failed'));
+            }
+        }).catch(function (err) {
+            alert((err && err.message) || 'Save failed');
         });
     });
 
     const formKeyModal = document.getElementById('formGeminiKeyModal');
     if (formKeyModal) {
-        formKeyModal.addEventListener('submit', function (e) {
-            e.preventDefault();
-            const input = document.getElementById('modal_gemini_api_keys');
-            const val = input ? input.value.trim() : '';
-            const validKeys = val.split(/[\r\n,]+/).map(function (s) { return s.trim(); }).filter(Boolean);
-            if (validKeys.length === 0) {
-                alert(t('gemini_key_required_prompt'));
-                return;
+        formKeyModal.addEventListener('submit', saveGeminiKeyModal);
+    }
+
+    const keyModalInput = document.getElementById('modal_gemini_api_keys');
+    if (keyModalInput) {
+        keyModalInput.addEventListener('keydown', function (e) {
+            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                e.preventDefault();
+                saveGeminiKeyModal(e);
             }
-            const saveBtn = document.getElementById('btnSaveGeminiKeyModal');
-            if (saveBtn) saveBtn.disabled = true;
-
-            const postData = {
-                do_action: 'save_settings',
-                gemini_api_keys: val,
-            };
-            if (isKeyModalRateLimit) {
-                postData.append_gemini_keys = '1';
-            }
-
-            postForm(postData).then(function (data) {
-                if (saveBtn) saveBtn.disabled = false;
-                if (data.success) {
-                    if (window.ZS_BOOT) {
-                        window.ZS_BOOT.has_ai = true;
-                    }
-                    const askBtn = document.getElementById('modalAskAiBtn');
-                    if (askBtn) askBtn.disabled = false;
-                    const autoBtn = document.getElementById('btnStartAuto');
-                    if (autoBtn) autoBtn.disabled = false;
-
-                    const cb = pendingAiCallback;
-                    closeGeminiKeyModal();
-                    showToast(data.message || t('settings_saved'));
-                    if (typeof cb === 'function') {
-                        cb();
-                    }
-                } else {
-                    alert(data.message || t('err_ai_failed'));
-                }
-            }).catch(function () {
-                if (saveBtn) saveBtn.disabled = false;
-            });
         });
     }
 
@@ -1315,7 +1367,13 @@ function bindUi() {
     }
     const testG = document.getElementById('btnTestGemini');
     if (testG) testG.addEventListener('click', function () {
-        postForm({ do_action: 'test_gemini' }).then(function (data) { showToast(data.message || JSON.stringify(data)); });
+        const keysInput = document.getElementById('set_gemini_api_keys');
+        const keysVal = keysInput ? keysInput.value.trim() : '';
+        const postData = { do_action: 'test_gemini' };
+        if (keysVal !== '') {
+            postData.gemini_api_keys = keysVal;
+        }
+        postForm(postData).then(function (data) { showToast(data.message || JSON.stringify(data)); });
     });
     const clearCache = document.getElementById('btnClearCache');
     if (clearCache) clearCache.addEventListener('click', function () {
