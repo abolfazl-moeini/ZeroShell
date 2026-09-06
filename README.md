@@ -36,7 +36,16 @@ The primary and recommended way to use ZeroShell on shared hosts (cPanel, Direct
    - **Ask AI** (Optional): Request an advisory second opinion from Google Gemini.
    - **Auto-Review** (Optional): Automatically analyzes eligible findings with AI and quarantines high-confidence threats (confidence ≥ 0.85).
 
-### 4. Subsequent Logins & Key Recovery
+### 4. Adding Gemini API Key (Optional AI Second Opinion)
+> [!IMPORTANT]
+> **Never commit your API key to Git!** Keep your repository clean. Add your key after deployment using either:
+> 1. **In Browser (Recommended)**: Click **Settings** in the top bar ➔ paste your key from [Google AI Studio](https://aistudio.google.com/) into **Google Gemini API Keys** ➔ click **Save Settings**. *(You can paste multiple keys, one per line, for automatic failover pooling).*
+> 2. **Via `.htaccess` or Environment**: Add the following line to your site's `.htaccess` file on the server:
+>    ```apache
+>    SetEnv GEMINI_API_KEY "AIzaSy..."
+>    ```
+
+### 5. Subsequent Logins & Key Recovery
 - **Logging back in**: When returning to `malware-cleaner.php`, enter your Security Key on the login card (`Access Denied`), or visit `https://your-domain.com/malware-cleaner.php?key=YOUR_SECURITY_KEY`.
 - **Forgot your key?**: In your hosting File Manager or FTP, navigate to `malware_cleaner_data/` (or the sibling `.zsdata_*` directory outside `public_html`) and delete `config.php`. Re-create `zs-setup.secret` and refresh the page to set a new key.
 - **Done cleaning?**: Delete `malware-cleaner.php` from your server once finished. Quarantined backups remain safely preserved in the data directory.
