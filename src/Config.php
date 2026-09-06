@@ -27,8 +27,44 @@ class ZS_Config {
         return "<?php http_response_code(403); header('Content-Type: text/plain; charset=UTF-8'); header('Cache-Control: no-store'); exit('Access Denied'); __HALT_COMPILER();\n";
     }
 
+    public static function ensureUtf8($str) {
+        if (!is_string($str) || $str === '') {
+            return '';
+        }
+        if (function_exists('mb_check_encoding') && @mb_check_encoding($str, 'UTF-8')) {
+            return $str;
+        }
+        if (defined('JSON_INVALID_UTF8_SUBSTITUTE')) {
+            $encoded = @json_encode($str, JSON_INVALID_UTF8_SUBSTITUTE);
+            if ($encoded !== false) {
+                $decoded = @json_decode($encoded);
+                if (is_string($decoded)) {
+                    return $decoded;
+                }
+            }
+        }
+        if (function_exists('mb_convert_encoding')) {
+            return @mb_convert_encoding($str, 'UTF-8', 'UTF-8');
+        }
+        if (function_exists('iconv')) {
+            $cleaned = @iconv('UTF-8', 'UTF-8//IGNORE', $str);
+            if ($cleaned !== false) {
+                return $cleaned;
+            }
+        }
+        return $str;
+    }
+
     public static function wrapJson($data) {
-        return self::envelopeGuard() . json_encode($data, JSON_UNESCAPED_SLASHES);
+        $flags = JSON_UNESCAPED_SLASHES;
+        if (defined('JSON_INVALID_UTF8_SUBSTITUTE')) {
+            $flags |= JSON_INVALID_UTF8_SUBSTITUTE;
+        }
+        $json = @json_encode($data, $flags);
+        if ($json === false) {
+            return false;
+        }
+        return self::envelopeGuard() . $json;
     }
 
     public static function unwrapJson($raw) {
@@ -130,12 +166,56 @@ class ZS_Config {
         if (!is_dir($dir) || @is_link($dir) || !is_writable($dir)) {
             return false;
         }
-        $tmp = $dir . '/.zs_restore_' . bin2hex(random_bytes(12)) . '.tmp';
-        $fp = @fopen($tmp, 'x');
+        $length = strlen($contents);
+
+        // 1. Prefer link() from a temporary file for atomic destination creation
+        // without replacing any existing destination.
+        if (function_exists('link')) {
+            $tmp = $dir . '/.zs_restore_' . bin2hex(random_bytes(12)) . '.tmp';
+            $fp = @fopen($tmp, 'x');
+            if ($fp) {
+                $written = 0;
+                $ok = true;
+                while ($written < $length) {
+                    $n = @fwrite($fp, substr($contents, $written));
+                    if ($n === false || $n === 0) {
+                        $ok = false;
+                        break;
+                    }
+                    $written += $n;
+                }
+                if (!@fflush($fp)) {
+                    $ok = false;
+                }
+                @fclose($fp);
+                if ($ok && $written === $length) {
+                    @chmod($tmp, $mode);
+                    if (@link($tmp, $path)) {
+                        @chmod($path, $mode);
+                        @unlink($tmp);
+                        return true;
+                    }
+                    // If link failed because destination was created concurrently, do not overwrite.
+                    if (file_exists($path) || is_link($path)) {
+                        @unlink($tmp);
+                        return false;
+                    }
+                }
+                @unlink($tmp);
+            }
+        }
+
+        // 2. Fallback for environments where link() is disabled in disable_functions
+        // or unsupported by the filesystem (e.g. Windows, FAT32, NFS, or shared hosting):
+        // fopen('xb') uses POSIX O_CREAT | O_EXCL, which atomically creates the file
+        // and fails if it already exists.
+        if (file_exists($path) || is_link($path)) {
+            return false;
+        }
+        $fp = @fopen($path, 'xb');
         if (!$fp) {
             return false;
         }
-        $length = strlen($contents);
         $written = 0;
         $ok = true;
         while ($written < $length) {
@@ -151,19 +231,10 @@ class ZS_Config {
         }
         @fclose($fp);
         if (!$ok || $written !== $length) {
-            @unlink($tmp);
-            return false;
-        }
-        @chmod($tmp, $mode);
-
-        // link() creates the destination atomically and fails if another
-        // process created it after the caller's existence check.
-        if (!@link($tmp, $path)) {
-            @unlink($tmp);
+            @unlink($path);
             return false;
         }
         @chmod($path, $mode);
-        @unlink($tmp);
         return true;
     }
 

@@ -230,11 +230,20 @@ class ZS_Engine {
             $severity = 'suspect';
         }
 
+        $cleanReasons = array();
+        foreach (array_values(array_unique($reasons)) as $r) {
+            $cleanReasons[] = ZS_Config::ensureUtf8($r);
+        }
+        $cleanEvidence = array();
+        foreach (array_slice(array_values(array_unique($evidence)), 0, 5) as $evItem) {
+            $cleanEvidence[] = ZS_Config::ensureUtf8($evItem);
+        }
+
         return array(
             'detected'  => $detected,
-            'reasons'   => array_values(array_unique($reasons)),
+            'reasons'   => $cleanReasons,
             'rule_ids'  => array_values(array_unique($ruleIds)),
-            'evidence'  => array_slice(array_values(array_unique($evidence)), 0, 5),
+            'evidence'  => $cleanEvidence,
             'severity'  => $severity,
             'truncated' => $truncated,
         );
@@ -251,6 +260,7 @@ class ZS_Engine {
         $start = max(0, $pos - $radius);
         $len = strlen($needle) + (2 * $radius);
         $snip = substr($content, $start, $len);
-        return str_replace(array("\r", "\n"), ' ', $snip);
+        $clean = str_replace(array("\r", "\n"), ' ', $snip);
+        return ZS_Config::ensureUtf8($clean);
     }
 }

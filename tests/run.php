@@ -1831,6 +1831,77 @@ run_test('F05: logout rejects cross-site POSTs without the session-bound CSRF to
     @rmdir($tempDir);
 });
 
+run_test('F03: atomicWriteNew works without link function and refuses overwrite', function () {
+    $tempDir = sys_get_temp_dir() . '/zs_f03_nolink_' . bin2hex(random_bytes(4));
+    @mkdir($tempDir, 0755, true);
+    $script = $tempDir . '/test_nolink.php';
+    $code = '<?php
+    define("ZS_INTERNAL", true);
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Config.php', true) . ';
+    $dir = $argv[1];
+    $dest = $dir . "/restored.php";
+    $ok = ZS_Config::atomicWriteNew($dest, "<?php // restored content", 0644);
+    if (!$ok || !file_exists($dest) || file_get_contents($dest) !== "<?php // restored content") {
+        exit(1);
+    }
+    // Attempting to write again must fail (no overwrite)
+    $over = ZS_Config::atomicWriteNew($dest, "<?php // malicious overwrite", 0644);
+    if ($over !== false || file_get_contents($dest) !== "<?php // restored content") {
+        exit(2);
+    }
+    exit(0);
+    ';
+    file_put_contents($script, $code);
+    $bin = (defined('PHP_BINARY') && PHP_BINARY) ? PHP_BINARY : 'php';
+    $cmd = escapeshellarg($bin) . ' -d disable_functions=link ' . escapeshellarg($script) . ' ' . escapeshellarg($tempDir);
+    $code = 0;
+    passthru($cmd, $code);
+    assert_equals(0, $code, 'atomicWriteNew must succeed on fresh file and refuse overwrite even with link() disabled');
+
+    @unlink($script);
+    @unlink($tempDir . '/restored.php');
+    @rmdir($tempDir);
+});
+
+run_test('F07: session and knowledge safely store and load findings with invalid or sliced UTF-8 bytes', function () {
+    $tempDir = sys_get_temp_dir() . '/zs_f07_utf8_' . bin2hex(random_bytes(4));
+    @mkdir($tempDir, 0700, true);
+
+    $store = new ZS_Store($tempDir);
+    $session = $store->initSession($tempDir, true);
+    assert_true(is_array($session), 'initSession must return session array');
+
+    // Add a finding with raw sliced multibyte / non-UTF-8 bytes in evidence and reasons
+    $invalidUtf8 = "\xB4\xD9\x84 (koman \xFF\xFE sample)";
+    $session['infected_files'][] = array(
+        'finding_id'     => 'test_utf8_finding',
+        'path'           => $tempDir . '/bad_utf8.php',
+        'reason'         => 'Test Suspicious: ' . $invalidUtf8,
+        'rule_ids'       => array('SIG-TEST'),
+        'evidence'       => array($invalidUtf8),
+        'severity'       => 'malware',
+        'size'           => 123,
+        'status'         => 'FOUND',
+        'raw_sha256'     => hash('sha256', 'dummy'),
+        'norm_sha256'    => hash('sha256', 'dummy'),
+        'coverage'       => 'full',
+        'scan_session_id'=> $session['scan_session_id'],
+    );
+
+    $saved = $store->saveSession($session);
+    assert_true($saved, 'saveSession must return true even with invalid/sliced UTF-8 in findings');
+
+    // Reload session in a new store instance
+    $store2 = new ZS_Store($tempDir);
+    $loaded = $store2->loadSession();
+    assert_true(is_array($loaded), 'loadSession must return valid array without corruption');
+    assert_equals(1, count($loaded['infected_files']), 'loaded session must contain the saved finding');
+    assert_true(strpos($loaded['infected_files'][0]['evidence'][0], 'koman') !== false, 'evidence text must be preserved');
+
+    @unlink($tempDir . '/session.php');
+    @rmdir($tempDir);
+});
+
 // -------------------------------------------------------------
 // Summary
 // -------------------------------------------------------------

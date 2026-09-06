@@ -5,7 +5,7 @@ class ZS_Gemini {
     public static function buildSnippet($content, $matchPattern = '') {
         $totalLen = strlen($content);
         if ($totalLen <= 32768) {
-            return array('snippet' => $content, 'coverage' => 'full', 'omitted' => false);
+            return array('snippet' => ZS_Config::ensureUtf8($content), 'coverage' => 'full', 'omitted' => false);
         }
 
         $headLen = 4096;
@@ -26,7 +26,7 @@ class ZS_Gemini {
         }
         $mid = substr($content, $startMid, $midWindow);
         $snippet = $head . "\n\n/* ... [ZeroShell: Truncated content window] ... */\n\n" . $mid . "\n\n/* ... [ZeroShell: Truncated content window] ... */\n\n" . $tail;
-        return array('snippet' => $snippet, 'coverage' => 'partial', 'omitted' => true);
+        return array('snippet' => ZS_Config::ensureUtf8($snippet), 'coverage' => 'partial', 'omitted' => true);
     }
 
     public static function redact($text, $rootDir = '') {
@@ -155,7 +155,8 @@ class ZS_Gemini {
                 ),
             ),
         );
-        $payloadJson = json_encode($payload);
+        $payloadFlags = defined('JSON_INVALID_UTF8_SUBSTITUTE') ? JSON_INVALID_UTF8_SUBSTITUTE : 0;
+        $payloadJson = json_encode($payload, $payloadFlags);
 
         $keys = ZS_Config::getGeminiKeys($config);
         if (empty($keys)) {

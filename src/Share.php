@@ -151,7 +151,8 @@ class ZS_Share {
         if (!isset($parts['scheme']) || strtolower($parts['scheme']) !== 'https' || empty($parts['host'])) {
             return array('success' => false, 'message' => 'Endpoint must be a valid HTTPS URL.');
         }
-        $jsonPayload = json_encode($bundle);
+        $jsonFlags = JSON_UNESCAPED_SLASHES | (defined('JSON_INVALID_UTF8_SUBSTITUTE') ? JSON_INVALID_UTF8_SUBSTITUTE : 0);
+        $jsonPayload = json_encode($bundle, $jsonFlags);
         $headers = array('Content-Type: application/json', 'User-Agent: ZeroShell-Cleaner/1.0');
         $res = ZS_Gemini::executeHttpRequest($reportEndpoint, $headers, $jsonPayload, 'POST');
         if (isset($res['status']) && $res['status'] >= 200 && $res['status'] < 300) {

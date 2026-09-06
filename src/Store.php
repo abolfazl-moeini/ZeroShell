@@ -152,7 +152,12 @@ class ZS_Store {
     }
 
     public function writeJsonFile($path, $data) {
-        return ZS_Config::atomicWrite($path, ZS_Config::wrapJson($data), 0600);
+        $wrapped = ZS_Config::wrapJson($data);
+        if ($wrapped === false) {
+            $this->lastError = 'Failed to encode JSON for ' . basename($path);
+            return false;
+        }
+        return ZS_Config::atomicWrite($path, $wrapped, 0600);
     }
 
     public function loadKnowledge() {
@@ -594,6 +599,10 @@ class ZS_Store {
                 $store->lastError = 'Auto-review completion returned invalid updates.';
                 return false;
             }
+            $session['infected_files'][$index]['claim_token'] = '';
+            $session['infected_files'][$index]['claim_job'] = '';
+            $session['infected_files'][$index]['claim_generation'] = 0;
+            $session['infected_files'][$index]['ai_claimed_at'] = 0;
             foreach ($out['updates'] as $key => $value) {
                 $session['infected_files'][$index][$key] = $value;
             }
