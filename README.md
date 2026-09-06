@@ -1,6 +1,47 @@
-# ZeroShell — WordPress malware scanner & reviewer
+# ZeroShell — WordPress Malware Scanner & Reviewer
 
-A drop-in PHP 7.4+ tool for **finding and reviewing suspicious PHP-like files** on a compromised WordPress (or generic PHP) host. It is not a guarantee that a site is clean.
+[English](README.md) | [فارسی (Persian)](README_FA.md)
+
+A drop-in, single-file PHP 7.4+ security tool for **finding, reviewing, and safely cleaning suspicious PHP files and webshells** on compromised WordPress sites or generic PHP directories. ZeroShell operates independently without loading WordPress, requires no Composer, database, Node, or external dependencies, and is designed to run directly in your **web browser** on restricted shared hosting (as well as via CLI).
+
+> [!NOTE]
+> No malware scanner can guarantee that a site is clean. ZeroShell is a focused review and cleanup assistant, not an absolute guarantee.
+
+---
+
+## ⚡ Quick Start / TL;DR (Browser & Shared Hosting)
+
+The primary and recommended way to use ZeroShell on shared hosts (cPanel, DirectAdmin, Plesk, LiteSpeed, Apache, Nginx):
+
+### 1. Upload & Claim Host Ownership
+1. Upload **`malware-cleaner.php`** (available in the repository root or under `dist/`) into your site root directory (e.g., `public_html/`).
+2. Create a new text file named **`zs-setup.secret`** in that same directory and write a short random token inside it (e.g., `mysecret123`).
+   *(This step proves you have write access to the host, preventing unauthorized visitors from claiming the cleaner).*
+
+### 2. Initial Setup in Browser
+3. Open your browser and navigate to:
+   ```text
+   https://your-domain.com/malware-cleaner.php
+   ```
+4. In the **Setup secret** field, enter the token you placed in `zs-setup.secret`.
+5. Enter a custom **Security Key** (min 12 characters) or save the auto-generated key shown on screen.
+6. Click **Save Key & Launch Scanner**. ZeroShell saves protected configuration and automatically removes `zs-setup.secret` from the server.
+
+### 3. Scan & Interactive Review
+7. Scanning starts automatically in your browser in small batches (max 500 files or 5 seconds each) with automatic refreshes, avoiding shared-host execution timeouts.
+8. When scanning finishes, the interactive findings dashboard is displayed:
+   - **View Source**: Inspect file contents safely as plain text (read-only, never executed).
+   - **Quarantine**: Securely backs up the infected file to a protected directory outside web access, verifies SHA-256 byte integrity, and removes the original.
+   - **Mark Clean**: Marks false positives as safe. Two independent confirmations across sessions or paths promote the file's raw checksum to permanent whitelist trust.
+   - **Ask AI** (Optional): Request an advisory second opinion from Google Gemini.
+   - **Auto-Review** (Optional): Automatically analyzes eligible findings with AI and quarantines high-confidence threats (confidence ≥ 0.85).
+
+### 4. Subsequent Logins & Key Recovery
+- **Logging back in**: When returning to `malware-cleaner.php`, enter your Security Key on the login card (`Access Denied`), or visit `https://your-domain.com/malware-cleaner.php?key=YOUR_SECURITY_KEY`.
+- **Forgot your key?**: In your hosting File Manager or FTP, navigate to `malware_cleaner_data/` (or the sibling `.zsdata_*` directory outside `public_html`) and delete `config.php`. Re-create `zs-setup.secret` and refresh the page to set a new key.
+- **Done cleaning?**: Delete `malware-cleaner.php` from your server once finished. Quarantined backups remain safely preserved in the data directory.
+
+---
 
 ## What you install
 
@@ -29,12 +70,12 @@ No findings ≠ a clean site. The UI states that explicitly.
 
 ## AI (optional)
 
-Manual review and auto-review work without an API key. To enable Gemini:
+Manual review works without an API key. To enable Gemini second opinions and auto-review:
 
-1. Create a key in Google AI Studio
+1. Create a free key in [Google AI Studio](https://aistudio.google.com/)
 2. Paste it in Settings (or set `GEMINI_API_KEY` / `GEMINI_API_KEYS`)
-3. Default model: `gemini-2.5-flash` (changeable). Confirm the id against [Google’s model list](https://ai.google.dev/gemini-api/docs/models) before a release; ids are retired.
-4. Snippets (redacted) are sent to Google. Confirm the prompt in the UI first.
+3. Default model: `gemini-2.5-flash` (changeable).
+4. Code snippets (redacted for credentials) are sent to Google.
 
 Rate limits are per Google project, not “N keys = N× quota.”
 
@@ -45,11 +86,15 @@ Quarantine copies the file into an envelope, verifies the hash, then unlinks the
 ## CLI
 
 ```bash
+# Full scan from command line
 php malware-cleaner.php
-php malware-cleaner.php --reset
-```
 
-Reset is a new scan session only. It does not delete quarantine, config, or the trusted list.
+# Reset scan session (keeps knowledge, whitelist, and quarantine intact)
+php malware-cleaner.php --reset
+
+# Run exactly one batch (ideal for shared host cron jobs)
+php malware-cleaner.php --one-batch
+```
 
 ## Development
 

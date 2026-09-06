@@ -68,6 +68,8 @@ return array(
     'wizard_desc' => 'Please set an access security key to protect this cleaner against unauthorized access.',
     'wizard_setup_secret' => 'Setup secret (from zs-setup.secret or ZS_SETUP_SECRET):',
     'wizard_setup_help' => 'Create {file} next to this script containing a random token, or set the ZS_SETUP_SECRET environment variable. This proves you can write to the host.',
+    'wizard_secret_found' => 'File {file} detected on server! Enter the token from that file below.',
+    'wizard_secret_missing' => 'File {file} not found yet. Please create it next to this script containing a random token.',
     'wizard_err_setup_secret' => 'Setup secret is missing or does not match.',
     'wizard_err_write' => 'Could not write the protected config directory.',
     'login_locked' => 'Too many failed logins. Try again in 15 minutes.',

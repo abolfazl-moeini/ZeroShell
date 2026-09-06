@@ -73,9 +73,19 @@ class ZS_Ui {
         <p style="color: #cbd5e1; font-size: 13px; line-height: 1.6;">
             <?php echo htmlspecialchars(ZS_I18n::t('wizard_desc'), ENT_QUOTES, 'UTF-8'); ?>
         </p>
-        <p style="color: #fde68a; font-size: 12px; line-height: 1.5;">
-            <?php echo htmlspecialchars(ZS_I18n::t('wizard_setup_help', array('file' => $secretPath)), ENT_QUOTES, 'UTF-8'); ?>
-        </p>
+        <?php
+        $secretFile = ZS_Config::getSetupSecretPath($rootDir);
+        $secretExists = (is_file($secretFile) && !is_link($secretFile));
+        ?>
+        <?php if ($secretExists) : ?>
+            <p style="color: #6ee7b7; font-size: 13px; line-height: 1.5; background: #064e3b; padding: 12px; border-radius: 8px; margin: 15px 0;">
+                <?php echo htmlspecialchars(ZS_I18n::t('wizard_secret_found', array('file' => $secretPath)), ENT_QUOTES, 'UTF-8'); ?>
+            </p>
+        <?php else : ?>
+            <p style="color: #fde68a; font-size: 13px; line-height: 1.5; background: #451a03; padding: 12px; border-radius: 8px; margin: 15px 0;">
+                <?php echo htmlspecialchars(ZS_I18n::t('wizard_secret_missing', array('file' => $secretPath)), ENT_QUOTES, 'UTF-8'); ?>
+            </p>
+        <?php endif; ?>
         <?php if (!empty($errorMsg)) : ?>
             <div style="background: #7f1d1d; color: #fee2e2; padding: 10px; border-radius: 6px; font-size: 13px; margin-bottom: 15px;">
                 <?php echo htmlspecialchars($errorMsg, ENT_QUOTES, 'UTF-8'); ?>
