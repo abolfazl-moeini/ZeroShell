@@ -1490,6 +1490,44 @@ run_test('F05: setup_wizard is forbidden once key_hash is configured and cleans 
     @rmdir($tempDir);
 });
 
+run_test('Setup: simplified setup allows choosing password directly without secret file', function () {
+    $tempDir = sys_get_temp_dir() . '/zs_setup_simple_' . bin2hex(random_bytes(4));
+    @mkdir($tempDir, 0755, true);
+
+    $config = array('key_hash' => '');
+    ZS_Config::saveConfig($config, $tempDir);
+
+    $script = $tempDir . '/run_simple_setup.php';
+    $code = '<?php
+    define("ZS_INTERNAL", true);
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Config.php', true) . ';
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Store.php', true) . ';
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/I18n.php', true) . ';
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Ui.php', true) . ';
+    require_once ' . var_export(dirname(dirname(__FILE__)) . '/src/Http.php', true) . ';
+    $tempDir = $argv[1];
+    $_SERVER["REQUEST_METHOD"] = "POST";
+    $_SERVER["SCRIPT_NAME"] = "/malware-cleaner.php";
+    $_POST = array(
+        "do_action" => "setup_wizard",
+        "password"  => "myPass123",
+    );
+    ZS_Http::handleRequest($tempDir, $tempDir);
+    ';
+    file_put_contents($script, $code);
+
+    $bin = (defined('PHP_BINARY') && PHP_BINARY) ? PHP_BINARY : 'php';
+    shell_exec(escapeshellarg($bin) . ' ' . escapeshellarg($script) . ' ' . escapeshellarg($tempDir));
+
+    $savedConfig = ZS_Config::loadConfig($tempDir);
+    assert_true(!empty($savedConfig['key_hash']), 'Key hash must be configured from password field');
+    assert_true(password_verify('myPass123', $savedConfig['key_hash']), 'Password must verify correctly against saved key_hash');
+
+    @unlink($script);
+    @unlink($tempDir . '/config.php');
+    @rmdir($tempDir);
+});
+
 // -------------------------------------------------------------
 // F09: Full content redaction before snippet window prevents leaks
 // -------------------------------------------------------------

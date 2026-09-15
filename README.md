@@ -13,19 +13,17 @@ A drop-in, single-file PHP 7.4+ security tool for **finding, reviewing, and safe
 
 The primary and recommended way to use ZeroShell on shared hosts (cPanel, DirectAdmin, Plesk, LiteSpeed, Apache, Nginx):
 
-### 1. Upload & Claim Host Ownership
+### 1. Upload to Site Root
 1. Upload **`malware-cleaner.php`** (available in the repository root or under `dist/`) into your site root directory (e.g., `public_html/`).
-2. Create a new text file named **`zs-setup.secret`** in that same directory and write a short random token inside it (e.g., `mysecret123`).
-   *(This step proves you have write access to the host, preventing unauthorized visitors from claiming the cleaner).*
 
 ### 2. Initial Setup in Browser
-3. Open your browser and navigate to:
+2. Open your browser and navigate to:
    ```text
    https://your-domain.com/malware-cleaner.php
    ```
-4. In the **Setup secret** field, enter the token you placed in `zs-setup.secret`.
-5. Enter a custom **Security Key** (min 12 characters) or save the auto-generated key shown on screen.
-6. Click **Save Key & Launch Scanner**. ZeroShell saves protected configuration and automatically removes `zs-setup.secret` from the server.
+3. Enter your chosen **Access Password** (or click the 🎲 generator button for a strong random password).
+4. Click **Save Password & Start Scanner**. ZeroShell creates its protected configuration and immediately logs you in.
+   *(Optional: If you wish to enforce host-write proof before setup, you can place a random token in `zs-setup.secret` or set `ZS_SETUP_SECRET` environment variable).*
 
 ### 3. Scan & Interactive Review
 7. Scanning starts automatically in your browser in small batches (max 500 files or 5 seconds each) with automatic refreshes, avoiding shared-host execution timeouts.
@@ -47,7 +45,7 @@ The primary and recommended way to use ZeroShell on shared hosts (cPanel, Direct
 
 ### 5. Subsequent Logins & Key Recovery
 - **Logging back in**: When returning to `malware-cleaner.php`, enter your Security Key on the login card (`Access Denied`), or visit `https://your-domain.com/malware-cleaner.php?key=YOUR_SECURITY_KEY`.
-- **Forgot your key?**: In your hosting File Manager or FTP, navigate to `malware_cleaner_data/` (or the sibling `.zsdata_*` directory outside `public_html`) and delete `config.php`. Re-create `zs-setup.secret` and refresh the page to set a new key.
+- **Forgot your key?**: In your hosting File Manager or FTP, navigate to `malware_cleaner_data/` (or the sibling `.zsdata_*` directory outside `public_html`) and delete `config.php`. Refresh the page to set a new password.
 - **Done cleaning?**: Delete `malware-cleaner.php` from your server once finished. Quarantined backups remain safely preserved in the data directory.
 
 ---
@@ -69,7 +67,7 @@ No findings ≠ a clean site. The UI states that explicitly.
 
 ## Security model
 
-- First-run setup requires a **setup secret** in `zs-setup.secret` next to the script, or env `ZS_SETUP_SECRET`. Whoever can write that file can claim the scanner.
+- First-run setup lets you choose your access password directly. Optional host-write proof is supported via `zs-setup.secret` or env `ZS_SETUP_SECRET`.
 - Access key is hashed. Sessions use HttpOnly cookies (`SameSite=Lax`). Mutating actions need CSRF.
 - Quarantine lives under the data directory (outside the web root when the parent of the site is writable). Samples are stored in a PHP envelope that exits 403 if requested over HTTP; they are not `include`d.
 - Restore refuses to overwrite an existing file and refuses symlink/parent escapes.

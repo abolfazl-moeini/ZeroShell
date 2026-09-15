@@ -220,13 +220,22 @@ class ZS_Http {
 
     private static function handleSetup($rootDir, $dataDir, $config) {
         $secret = ZS_Config::readSetupSecret($rootDir);
-        $provided = isset($_POST['setup_secret']) ? trim((string)$_POST['setup_secret']) : '';
-        if ($secret === '' || !hash_equals($secret, $provided)) {
-            ZS_Ui::renderWizard($rootDir, $config, ZS_I18n::t('wizard_err_setup_secret'));
-            return;
+        if ($secret !== '') {
+            $provided = isset($_POST['setup_secret']) ? trim((string)$_POST['setup_secret']) : '';
+            if ($provided === '' || !hash_equals($secret, $provided)) {
+                ZS_Ui::renderWizard($rootDir, $config, ZS_I18n::t('wizard_err_setup_secret'));
+                return;
+            }
         }
-        $chosenKey = !empty($_POST['custom_key']) ? trim($_POST['custom_key']) : trim(isset($_POST['generated_key']) ? $_POST['generated_key'] : '');
-        if (strlen($chosenKey) < 12) {
+        $chosenKey = '';
+        if (isset($_POST['password']) && trim((string)$_POST['password']) !== '') {
+            $chosenKey = trim((string)$_POST['password']);
+        } elseif (isset($_POST['custom_key']) && trim((string)$_POST['custom_key']) !== '') {
+            $chosenKey = trim((string)$_POST['custom_key']);
+        } elseif (isset($_POST['generated_key']) && trim((string)$_POST['generated_key']) !== '') {
+            $chosenKey = trim((string)$_POST['generated_key']);
+        }
+        if (strlen($chosenKey) < 6) {
             ZS_Ui::renderWizard($rootDir, $config, ZS_I18n::t('wizard_err_short'));
             return;
         }
@@ -739,7 +748,7 @@ class ZS_Http {
         $updates = array();
         if (!empty($_POST['new_access_key'])) {
             $newKey = trim($_POST['new_access_key']);
-            if (strlen($newKey) < 12) {
+            if (strlen($newKey) < 6) {
                 self::jsonFail(400, ZS_I18n::t('wizard_err_short'));
             }
             $updates['key_hash'] = password_hash($newKey, PASSWORD_DEFAULT);

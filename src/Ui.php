@@ -59,33 +59,20 @@ class ZS_Ui {
 
     public static function renderWizard($rootDir, $config, $errorMsg = '') {
         self::renderHtmlHeader(ZS_I18n::t('wizard_title'));
-        $genKey = bin2hex(random_bytes(16));
         $lang = ZS_I18n::getLang();
-        $secretPath = 'zs-setup.secret';
+        $secret = ZS_Config::readSetupSecret($rootDir);
+        $secretExists = ($secret !== '');
         ?>
-    <div class="card" style="max-width: 600px; margin-top: 40px;">
+    <div class="card" style="max-width: 480px; margin-top: 50px;">
         <div class="header-row">
             <h2><?php echo htmlspecialchars(ZS_I18n::t('wizard_title'), ENT_QUOTES, 'UTF-8'); ?></h2>
             <button type="button" class="btn btn-outline" data-switch-lang="<?php echo $lang === 'fa' ? 'en' : 'fa'; ?>">
                 <?php echo $lang === 'fa' ? 'English' : 'فارسی'; ?>
             </button>
         </div>
-        <p style="color: #cbd5e1; font-size: 13px; line-height: 1.6;">
+        <p style="color: #94a3b8; font-size: 13px; margin: 10px 0 20px 0; line-height: 1.6;">
             <?php echo htmlspecialchars(ZS_I18n::t('wizard_desc'), ENT_QUOTES, 'UTF-8'); ?>
         </p>
-        <?php
-        $secretFile = ZS_Config::getSetupSecretPath($rootDir);
-        $secretExists = (is_file($secretFile) && !is_link($secretFile));
-        ?>
-        <?php if ($secretExists) : ?>
-            <p style="color: #6ee7b7; font-size: 13px; line-height: 1.5; background: #064e3b; padding: 12px; border-radius: 8px; margin: 15px 0;">
-                <?php echo htmlspecialchars(ZS_I18n::t('wizard_secret_found', array('file' => $secretPath)), ENT_QUOTES, 'UTF-8'); ?>
-            </p>
-        <?php else : ?>
-            <p style="color: #fde68a; font-size: 13px; line-height: 1.5; background: #451a03; padding: 12px; border-radius: 8px; margin: 15px 0;">
-                <?php echo htmlspecialchars(ZS_I18n::t('wizard_secret_missing', array('file' => $secretPath)), ENT_QUOTES, 'UTF-8'); ?>
-            </p>
-        <?php endif; ?>
         <?php if (!empty($errorMsg)) : ?>
             <div style="background: #7f1d1d; color: #fee2e2; padding: 10px; border-radius: 6px; font-size: 13px; margin-bottom: 15px;">
                 <?php echo htmlspecialchars($errorMsg, ENT_QUOTES, 'UTF-8'); ?>
@@ -93,24 +80,69 @@ class ZS_Ui {
         <?php endif; ?>
         <form method="POST" action="">
             <input type="hidden" name="do_action" value="setup_wizard">
-            <input type="hidden" name="generated_key" value="<?php echo htmlspecialchars($genKey, ENT_QUOTES, 'UTF-8'); ?>">
+            <?php if ($secretExists) : ?>
+                <div class="form-group" style="background: #0f172a; padding: 12px; border-radius: 6px; border: 1px solid #334155; margin-bottom: 16px;">
+                    <label style="color: #94a3b8; font-size: 12px; margin-bottom: 6px; display: block;"><?php echo htmlspecialchars(ZS_I18n::t('wizard_setup_secret'), ENT_QUOTES, 'UTF-8'); ?></label>
+                    <input type="password" name="setup_secret" class="form-input" required autocomplete="off">
+                </div>
+            <?php endif; ?>
             <div class="form-group">
-                <label><?php echo htmlspecialchars(ZS_I18n::t('wizard_setup_secret'), ENT_QUOTES, 'UTF-8'); ?></label>
-                <input type="password" name="setup_secret" class="form-input" required>
+                <label for="setupPassword" style="display: block; margin-bottom: 6px; font-weight: 500;"><?php echo htmlspecialchars(ZS_I18n::t('wizard_password'), ENT_QUOTES, 'UTF-8'); ?></label>
+                <div style="position: relative; display: flex; align-items: center;">
+                    <input type="password" name="password" id="setupPassword" class="form-input" required minlength="6" placeholder="<?php echo htmlspecialchars(ZS_I18n::t('wizard_password_placeholder'), ENT_QUOTES, 'UTF-8'); ?>" style="padding-<?php echo $lang === 'fa' ? 'left' : 'right'; ?>: 42px; width: 100%;" autofocus autocomplete="new-password">
+                    <button type="button" id="togglePasswordBtn" style="position: absolute; <?php echo $lang === 'fa' ? 'left: 10px;' : 'right: 10px;'; ?> background: none; border: none; color: #94a3b8; cursor: pointer; font-size: 16px; padding: 4px; line-height: 1;" title="Show/Hide" aria-label="Toggle password visibility">👁️</button>
+                </div>
             </div>
-            <div class="form-group">
-                <label><?php echo htmlspecialchars(ZS_I18n::t('wizard_generated'), ENT_QUOTES, 'UTF-8'); ?></label>
-                <input type="text" readonly class="form-input" value="<?php echo htmlspecialchars($genKey, ENT_QUOTES, 'UTF-8'); ?>" style="font-family: monospace;" onclick="this.select();">
+            <div style="display: flex; justify-content: flex-end; margin-bottom: 20px;">
+                <button type="button" id="btnGenPassword" class="btn btn-outline" style="font-size: 12px; padding: 4px 10px;">
+                    🎲 <?php echo htmlspecialchars(ZS_I18n::t('wizard_generate_btn'), ENT_QUOTES, 'UTF-8'); ?>
+                </button>
             </div>
-            <div class="form-group">
-                <label><?php echo htmlspecialchars(ZS_I18n::t('wizard_custom'), ENT_QUOTES, 'UTF-8'); ?></label>
-                <input type="text" name="custom_key" class="form-input" minlength="12">
-            </div>
-            <button type="submit" class="btn btn-blue" style="width: 100%; padding: 12px;">
+            <button type="submit" class="btn btn-blue" style="width: 100%; padding: 12px; font-size: 14px; font-weight: 600;">
                 <?php echo htmlspecialchars(ZS_I18n::t('wizard_submit'), ENT_QUOTES, 'UTF-8'); ?>
             </button>
         </form>
     </div>
+    <script>
+    (function() {
+        var inp = document.getElementById('setupPassword');
+        var toggle = document.getElementById('togglePasswordBtn');
+        var gen = document.getElementById('btnGenPassword');
+        if (toggle && inp) {
+            toggle.addEventListener('click', function() {
+                if (inp.type === 'password') {
+                    inp.type = 'text';
+                    toggle.textContent = '🔒';
+                } else {
+                    inp.type = 'password';
+                    toggle.textContent = '👁️';
+                }
+            });
+        }
+        if (gen && inp) {
+            gen.addEventListener('click', function() {
+                var chars = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$%&*';
+                var pass = '';
+                var array = new Uint8Array(16);
+                if (window.crypto && window.crypto.getRandomValues) {
+                    window.crypto.getRandomValues(array);
+                    for (var i = 0; i < 16; i++) {
+                        pass += chars[array[i] % chars.length];
+                    }
+                } else {
+                    for (var i = 0; i < 16; i++) {
+                        pass += chars[Math.floor(Math.random() * chars.length)];
+                    }
+                }
+                inp.value = pass;
+                inp.type = 'text';
+                if (toggle) toggle.textContent = '🔒';
+                inp.focus();
+                inp.select();
+            });
+        }
+    })();
+    </script>
         <?php
         self::renderHtmlFooter();
     }
