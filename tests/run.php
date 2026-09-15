@@ -5038,6 +5038,35 @@ run_test('Share Preview Box: CSS and HTML markup enforce overflow containment an
     @rmdir($tempDir);
 });
 
+run_test('Engine Detection: Ngiler WebShell family and x.php sample detection', function () use ($repoRoot) {
+    $rules = ZS_Rules::bundled();
+
+    // 1. Test synthetic fixture
+    $fixturePath = $repoRoot . '/tests/fixtures/ngiler_sample.php';
+    assert_true(file_exists($fixturePath), 'Fixture ngiler_sample.php missing');
+    $fixtureContent = file_get_contents($fixturePath);
+    $fixtureNorm = ZS_Hash::normalized($fixtureContent);
+    $fixtureScan = ZS_Engine::scanFile($fixturePath, basename($fixturePath), $fixtureContent, $fixtureNorm, $rules, dirname($fixturePath));
+    assert_true($fixtureScan['detected'], 'Synthetic fixture must be detected');
+    assert_equals('malware', $fixtureScan['severity'], 'Synthetic fixture severity must be malware');
+    assert_true(in_array('SIG-NGILER-ESC-01', $fixtureScan['rule_ids']), 'Must match SIG-NGILER-ESC-01');
+    assert_true(in_array('SIG-EKSE-KOMAN-01', $fixtureScan['rule_ids']), 'Must match SIG-EKSE-KOMAN-01');
+    assert_true(in_array('SIG-NET-HEXNET-01', $fixtureScan['rule_ids']), 'Must match SIG-NET-HEXNET-01');
+
+    // 2. Test live sample if present on disk
+    $samplePath = '/Users/moeini/Downloads/x.php';
+    if (file_exists($samplePath)) {
+        $sampleContent = file_get_contents($samplePath);
+        $sampleNorm = ZS_Hash::normalized($sampleContent);
+        $sampleScan = ZS_Engine::scanFile($samplePath, basename($samplePath), $sampleContent, $sampleNorm, $rules, dirname($samplePath));
+        assert_true($sampleScan['detected'], 'Sample x.php must be detected');
+        assert_equals('malware', $sampleScan['severity'], 'Sample x.php severity must be malware');
+        assert_true(in_array('HASH-NGILER-01', $sampleScan['rule_ids']), 'Must match HASH-NGILER-01');
+        assert_true(in_array('SIG-NGILER-ESC-01', $sampleScan['rule_ids']), 'Must match SIG-NGILER-ESC-01');
+        assert_true(in_array('SIG-EKSE-KOMAN-01', $sampleScan['rule_ids']), 'Must match SIG-EKSE-KOMAN-01');
+    }
+});
+
 
 if ($prevEnvKey !== false) {
     putenv('GEMINI_API_KEY=' . $prevEnvKey);

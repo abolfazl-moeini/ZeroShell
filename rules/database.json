@@ -6,6 +6,12 @@
       "sha256": "6a3eb5b8e3f9a0d81b2456387a2f5f9369f052685168090aeb0415ac42e4a1bd",
       "name": "Nirmala / Hesperion Backdoor Shell",
       "reason_key": "hash_nirmala"
+    },
+    {
+      "id": "HASH-NGILER-01",
+      "sha256": "e18ac69938a198263576c23547a9cbbcbf93202a6ff0e4da3177d4ddd9d9f88b",
+      "name": "Ngiler SH3LL 360 WebShell",
+      "reason_key": "hash_ngiler"
     }
   ],
   "signatures": [
@@ -64,6 +70,27 @@
       "pattern": "Ngiler",
       "name": "Ngiler WebShell Family",
       "reason_key": "sig_ngiler_family"
+    },
+    {
+      "id": "SIG-NGILER-ESC-01",
+      "type": "literal_contains",
+      "pattern": "\\116\\x67\\151\\x6c\\x65\\162\\x20\\123\\x48\\63\\114\\114",
+      "name": "Ngiler SH3LL Escaped Identity",
+      "reason_key": "sig_ngiler_esc"
+    },
+    {
+      "id": "SIG-EKSE-KOMAN-01",
+      "type": "literal_contains",
+      "pattern": "ekse($_POST['koman']",
+      "name": "Ngiler WebShell Command Execution (ekse koman)",
+      "reason_key": "sig_ekse_koman"
+    },
+    {
+      "id": "SIG-NET-HEXNET-01",
+      "type": "literal_contains",
+      "pattern": "function net($hexnet)",
+      "name": "Ngiler Path Obfuscation Decoder (net hexnet)",
+      "reason_key": "sig_net_hexnet"
     },
     {
       "id": "SIG-BENGALI-OBF-01",
